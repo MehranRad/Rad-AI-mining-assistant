@@ -1,13 +1,16 @@
 'use client'
 
 import { useState } from 'react'
+import { useRouter } from 'next/navigation'
 import { Eye, EyeOff, Loader2, AlertCircle } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Checkbox } from '@/components/ui/checkbox'
+import { loginRequest } from '@/lib/api'
 
 export function LoginForm() {
+  const router = useRouter()
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [showPassword, setShowPassword] = useState(false)
@@ -26,10 +29,11 @@ export function LoginForm() {
 
     setIsLoading(true)
     try {
-      await new Promise((resolve) => setTimeout(resolve, 900))
-      setError('اتصال به سرور هنوز پیاده‌سازی نشده است.')
-    } catch {
-      setError('نام کاربری یا رمز عبور اشتباه است.')
+      const user = await loginRequest(username.trim(), password)
+      localStorage.setItem('rad_ai_user', JSON.stringify(user))
+      router.push('/chat')
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'نام کاربری یا رمز عبور اشتباه است.')
     } finally {
       setIsLoading(false)
     }
@@ -100,7 +104,7 @@ export function LoginForm() {
             id="remember"
             checked={rememberMe}
             onCheckedChange={(v) => setRememberMe(v === true)}
-            className="border-neutral-700 data-[state=checked]:bg-[#E08A4F] data-[state=checked]:border-[#E08A4F]"
+            className="border-neutral-700 data-checked:bg-[#E08A4F] data-checked:border-[#E08A4F]"
           />
           <Label htmlFor="remember" className="text-neutral-400 text-sm font-normal cursor-pointer">
             مرا به خاطر بسپار

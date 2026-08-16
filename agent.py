@@ -298,27 +298,37 @@ def regex_security_check(question: str) -> str:
 
     return "SAFE"
 
+# Generic superlative words ("کمترین"/"بیشترین"/...) can describe ANY
+# topic — a mine's risk, a mine's equipment count, etc — not just an
+# employee. Only "کدام کارمند" is unambiguous on its own. For the other,
+# generic superlatives, require them to be paired with an employee/
+# personal-data context word before treating the question as being
+# about ONE specific individual — otherwise "کدام معدن بیشترین ریسک را
+# دارد؟" gets misrouted as an individual-employee lookup.
+STRONG_SINGLING_OUT_FA = ["کدام کارمند"]
+GENERIC_SUPERLATIVE_FA = ["کمترین", "بیشترین", "بالاترین", "پایین‌ترین"]
+EMPLOYEE_CONTEXT_WORDS_FA = ["کارمند", "کارکنان", "پرسنل", "کارگر", "حقوق", "دستمزد"]
+
+
 def is_individual_employee_question(question: str) -> bool:
-    """
-    Lightweight ROUTING detector — independent from the security-risk
-    classifier — for whether a question is fundamentally about ONE specific
-    employee (named, or an extremal/singling-out phrase like "who has the
-    lowest salary"). Used only to decide which pipeline handles the
-    question (simple vs fixed-query), NOT to block anything — blocking is
-    handled separately and earlier by run_security_checks().
-    """
     q_lower = question.lower()
     has_personal_indicator = (
         any(w in question for w in PERSONAL_INDICATOR_WORDS_FA)
         or any(w in q_lower for w in PERSONAL_INDICATOR_WORDS_EN)
     )
     has_name_pattern = bool(re.search(r"\b[A-Z][a-z]+\s+[A-Z][a-z]+\b", question))
-    has_singling_out = (
-        any(w in question for w in SINGLING_OUT_WORDS_FA)
-        or any(w in q_lower for w in SINGLING_OUT_WORDS_EN)
+
+    has_strong_singling_out = any(w in question for w in STRONG_SINGLING_OUT_FA)
+    has_generic_superlative = any(w in question for w in GENERIC_SUPERLATIVE_FA)
+    has_employee_context = any(w in question for w in EMPLOYEE_CONTEXT_WORDS_FA)
+    has_sensitive_topic = any(w in q_lower for w in SENSITIVE_TOPIC_WORDS)
+    # A generic superlative ("بیشترین"/"کمترین") only counts as singling
+    # out an INDIVIDUAL when it's actually paired with employee/personal
+    # context — otherwise it's just comparing mines, equipment, etc.
+    has_singling_out = has_strong_singling_out or (
+        has_generic_superlative and (has_employee_context or has_sensitive_topic)
     )
-    # Persian rarely capitalizes names, so also catch common Persian
-    # personal-question patterns even without an explicit "Mr./Mrs." word.
+
     has_persian_name_question = bool(re.search(r"(حقوق|سن|تاریخ استخدام)\s+.*\s+چقدر", question))
     return has_personal_indicator or has_name_pattern or has_singling_out or has_persian_name_question
 
@@ -420,7 +430,7 @@ def generate_sql(question: str, role: str = "supervisor") -> str:
     extra_rules = MANAGER_INDIVIDUAL_LOOKUP_RULES if role == "manager" else ""
     prompt = f"""You are a MySQL expert. Given the table schema below, write ONE SQL query 
 that answers the question, which may be written in Persian (Farsi). Use ONLY the exact table 
-names, column names, and English categorical values listed in the schema.
+names, column names, and Persian/English categorical values listed in the schema.
 Prefer aggregate functions (COUNT, AVG, SUM, GROUP BY) over listing raw rows. If the question 
 could return many individual rows, add "LIMIT 50".
 Return ONLY the raw SQL query, nothing else. No explanation, no markdown, no backticks.
@@ -458,6 +468,69 @@ def is_empty_sql_result(result) -> bool:
 
 _EMPLOYEE_NAMES_CACHE = None
 
+def format_conversation_history(history) -> str:
+    """
+    history: a list of {"role": "user"|"assistant", "content": str} dicts,
+    in chronological order. Returns a short labeled text block of the
+    LAST 3 messages only (to keep prompt size/latency bounded — this is
+    NOT full conversation memory), or "" if there's no history. This lets
+    generate_sql() resolve follow-up references ("منظورم ... بود") without
+    the user repeating the full original question.
+    """
+    if not history:
+        return ""
+    trimmed = history[-3:]
+    lines = ["Recent conversation history (most recent last) — use this ONLY "
+              "to resolve what the current question refers to if it's a "
+              "follow-up/correction; the CURRENT question below is still "
+              "the one to answer:"]
+    for h in trimmed:
+        role_label = "User" if h.get("role") == "user" else "Assistant"
+        lines.append(f"{role_label}: {h.get('content', '')}")
+    return "\n".join(lines)
+
+def resolve_followup_question(question: str, history: str) -> str:
+    """
+    GENERAL follow-up/correction resolver — works for ANY topic (a person,
+    a mine, equipment, a metric, etc), not just keyword-triggered cases.
+    If the current question depends on the previous turn (a correction,
+    "همون سوال قبلی رو" ,"نه منظورم X بود" a pronoun reference, etc), this
+    rewrites it into a fully self-contained question using the recent
+    history, so every downstream step (routing, SQL generation, security
+    classification) works from a complete question instead of a fragment.
+    If there's no history, or the question is already self-contained,
+    it's returned unchanged — no extra cost for a fresh conversation.
+    """
+    if not history:
+        return question
+    try:
+        prompt = f"""{history}
+
+Current message from the user (in Persian): "{question}"
+
+Is this current message a follow-up, correction, or reference to the
+recent conversation above (e.g. correcting a name/mine/entity mentioned
+before, or referring back to "همون" / "آن" without repeating it)?
+
+If YES: rewrite the current message into a FULL, self-contained question
+in Persian that includes everything needed to answer it on its own,
+using the correction/context from the history (e.g. if the user says
+"نه منظورم سرچشمه بود" after asking about Sungun, the rewritten question
+should ask about Sarcheshmeh instead of Sungun).
+
+If NO (it's already a standalone question unrelated to the history):
+return the current message EXACTLY as-is, unchanged.
+
+Respond with ONLY the final question text in Persian. No explanation,
+no quotes, no extra text."""
+        response = llm.invoke(prompt)
+        rewritten = response.content.strip().strip('"').strip('«»')
+        return rewritten if rewritten else question
+    except Exception:
+        # If this step fails for any reason, fall back to the raw
+        # question rather than blocking the whole pipeline.
+        return question
+
 def get_all_employee_names():
     """
     Fetches the distinct (FirstName, LastName) pairs from the Employees
@@ -481,15 +554,17 @@ def get_all_employee_names():
 
 def correct_name_spelling_in_sql(sql: str) -> str:
     """
-    The LLM only transliterates a Persian name into an approximate English
-    spelling (e.g. "قاسمی" -> "Qasemi"), which may not exactly match the
-    real spelling stored in the database (e.g. "Ghasemi"). This replaces
-    the FirstName/LastName literals in the SQL with the closest REAL
-    (FirstName, LastName) pair found in the database, using plain
-    string-similarity matching in Python — never by asking the LLM to
-    guess again. If no real name is a close enough match, the SQL is
-    left unchanged (so the "not found" message from the empty-result
-    check still applies correctly).
+    Corrects minor spelling/transliteration variants of a REAL employee's
+    name (e.g. a slightly different but recognizable spelling) into the
+    exact spelling stored in the database. This is a LAST-RESORT fallback,
+    only ever called when the exact-match query already returned ZERO
+    rows (see ask_question) — never applied eagerly — so it can only ever
+    fix a near-miss, never invent a match for a name that plainly doesn't
+    exist.
+    BOTH the first name AND last name must independently be a strong
+    match (not just the average) — this prevents a name sharing a common
+    first name (e.g. "علی") from being "corrected" into a totally
+    unrelated last name.
     """
     match = re.search(
         r"FirstName\s*=\s*'([^']+)'.*?LastName\s*=\s*'([^']+)'",
@@ -506,17 +581,20 @@ def correct_name_spelling_in_sql(sql: str) -> str:
     best = None
     best_score = 0.0
     for fn, ln in candidates:
-        score = (
-            difflib.SequenceMatcher(None, given_first.lower(), fn.lower()).ratio()
-            + difflib.SequenceMatcher(None, given_last.lower(), ln.lower()).ratio()
-        ) / 2
+        first_ratio = difflib.SequenceMatcher(None, given_first, fn).ratio()
+        last_ratio = difflib.SequenceMatcher(None, given_last, ln).ratio()
+        # Reject unless BOTH parts are independently close — an exact
+        # first-name match can no longer mask a mismatched last name.
+        if first_ratio < 0.6 or last_ratio < 0.6:
+            continue
+        score = (first_ratio + last_ratio) / 2
         if score > best_score:
             best_score = score
             best = (fn, ln)
 
-    # Only substitute when reasonably confident — avoids matching a
-    # totally unrelated real name when the person genuinely doesn't exist.
-    if best and best_score >= 0.6:
+    # High bar: this only fires for genuine near-misses (e.g. one
+    # character different), not for a name that simply doesn't exist.
+    if best and best_score >= 0.85:
         corrected = sql.replace(f"'{given_first}'", f"'{best[0]}'")
         corrected = corrected.replace(f"'{given_last}'", f"'{best[1]}'")
         return corrected
@@ -776,13 +854,64 @@ CRITICAL RULES:
             f"(جزئیات فنی خطا: {str(e)})"
         )
 
+def generate_final_answer_stream(question: str, context_blocks: list):
+    """
+    Streaming counterpart to generate_final_answer() — same prompt, same
+    rules, but yields text chunks as the model generates them instead of
+    waiting for the full response. Used only by ask_question_stream().
+    """
+    joined_context = "\n\n".join(context_blocks)
+    prompt = f"""You are a professional data analyst for a copper mining company in Iran.
 
-def ask_question(question: str, role: str = "staff", username: str = "unknown", verbose: bool = False) -> dict:
-    """Main entry point, with the full layered security pipeline applied first."""
+The user asked (in Persian): {question}
+
+Here is the data you retrieved:
+{joined_context}
+
+Write your ENTIRE answer in Persian (Farsi), in clear professional business language.
+Keep mine names, numbers, and technical terms as they are.
+
+CRITICAL RULES:
+- ONLY talk about topics that are present in the data above.
+- NEVER invent, estimate, or guess a number that is not explicitly present in the data above.
+- NEVER assume the mine/entity named in the user's question is automatically the
+  "highest" or "lowest" on any metric — always verify this against the actual
+  ranking given in the data before making such a claim.
+- If a difference is explicitly labeled "NOT meaningful" in the data above, say so
+  plainly (e.g. "تفاوت معناداری بین معادن مشاهده نمی‌شود") rather than treating a
+  small numeric difference as if it were a significant problem requiring action.
+- If differences/percentages are already labeled above, use those exact numbers and translate
+  the labels into Persian yourself. Do NOT recalculate or re-judge significance.
+- If a query failed or is marked unavailable, say so clearly in Persian instead of guessing.
+- Be concise. Do not add unnecessary sections.
+- Write the final answer ONLY in Persian."""
+    try:
+        for chunk in llm.stream(prompt):
+            content = getattr(chunk, "content", "")
+            if content:
+                yield content
+    except Exception as e:
+        yield (
+            "متاسفانه در حال حاضر مدل هوش مصنوعی محلی قادر به پردازش این سوال نبود. "
+            "لطفاً چند لحظه صبر کنید و دوباره تلاش کنید.\n\n"
+            f"(جزئیات فنی خطا: {str(e)})"
+        )
+
+def ask_question(question: str, role: str = "staff", username: str = "unknown",
+                  history: list | None = None, verbose: bool = False) -> dict:
     steps = []
     print(f"[ask_question] role={role}, question={question!r}")
 
-    risk_category = run_security_checks(question)
+    # Resolve follow-ups/corrections BEFORE any routing or security
+    # decision, so every downstream step sees a complete, self-contained
+    # question — this is what makes the fix general (works for names,
+    # mines, equipment, or anything else) instead of keyword-specific.
+    history_text = format_conversation_history(history)
+    resolved_question = resolve_followup_question(question, history_text)
+    if resolved_question != question:
+        print(f"[ask_question] resolved follow-up: {question!r} -> {resolved_question!r}")
+
+    risk_category = run_security_checks(resolved_question, role=role)
     manager_override = (role == "manager" and risk_category == "INDIVIDUAL_PERSONAL_DATA")
 
     if risk_category != "SAFE" and not manager_override:
@@ -792,15 +921,12 @@ def ask_question(question: str, role: str = "staff", username: str = "unknown", 
         return {"answer": message, "is_complex": None, "steps": [],
                 "is_confidential": risk_category in CONFIDENTIAL_CATEGORIES}
 
-    is_complex = classify_question_complexity(question)
-    manager_individual_lookup = (role == "manager" and is_individual_employee_question(question))
+    is_complex = classify_question_complexity(resolved_question)
+    manager_individual_lookup = (role == "manager" and is_individual_employee_question(resolved_question))
 
     try:
         if not is_complex or manager_individual_lookup:
-            sql = generate_sql(question, role=role)
-
-            if manager_individual_lookup:
-                sql = correct_name_spelling_in_sql(sql)
+            sql = generate_sql(resolved_question, role=role)
 
             if "REFUSED_INDIVIDUAL_LOOKUP" in sql or check_sql_for_privacy_risk(sql, role=role):
                 print(f"[SECURITY] Blocked generated SQL (privacy risk): {sql}")
@@ -816,6 +942,18 @@ def ask_question(question: str, role: str = "staff", username: str = "unknown", 
                         "steps": [], "is_confidential": role_risk in CONFIDENTIAL_CATEGORIES}
 
             result = run_sql(sql)
+
+            # Spelling-correction fallback: only triggered when the exact
+            # query found NOTHING. Retries once with the closest real
+            # name; if that still finds nothing, the "not found" message
+            # below is shown — never a fabricated/wrong match.
+            if manager_individual_lookup and is_empty_sql_result(result):
+                corrected_sql = correct_name_spelling_in_sql(sql)
+                if corrected_sql != sql:
+                    print(f"[NAME CORRECTION] retrying with corrected SQL: {corrected_sql}")
+                    sql = corrected_sql
+                    result = run_sql(sql)
+
             steps.append({"label": "پرس‌وجوی داده", "sql": sql.strip(), "result": str(result)})
 
             if isinstance(result, str) and result.startswith("SQL_ERROR"):
@@ -838,13 +976,13 @@ def ask_question(question: str, role: str = "staff", username: str = "unknown", 
                 f"(Use the column order in the SELECT clause above to correctly map "
                 f"each value to its column.)"
             )
-            answer = generate_final_answer(question, [context])
+            answer = generate_final_answer(resolved_question, [context])
             log_audit_event(username, role, "SAFE", question, was_blocked=False)
             return {"answer": answer, "is_complex": False, "steps": steps,
                     "is_confidential": manager_individual_lookup}
 
         else:
-            topics = detect_question_topics(question)
+            topics = detect_question_topics(resolved_question)
             context_blocks = []
 
             if "production" in topics:
@@ -884,7 +1022,7 @@ def ask_question(question: str, role: str = "staff", username: str = "unknown", 
             if not context_blocks:
                 context_blocks.append("No relevant data could be retrieved for this question.")
 
-            answer = generate_final_answer(question, context_blocks)
+            answer = generate_final_answer(resolved_question, context_blocks)
             log_audit_event(username, role, "SAFE", question, was_blocked=False)
             return {"answer": answer, "is_complex": True, "steps": steps, "is_confidential": False}
 
@@ -892,3 +1030,148 @@ def ask_question(question: str, role: str = "staff", username: str = "unknown", 
         log_audit_event(username, role, "ERROR", question, was_blocked=False)
         return {"answer": f"خطا در پردازش سوال: {str(e)}", "is_complex": None, "steps": steps,
                 "is_confidential": False}
+
+def ask_question_stream(question: str, role: str = "staff", username: str = "unknown",
+                         history: list | None = None):
+    """
+    Streaming counterpart to ask_question(). Runs the exact same security/
+    RBAC/routing/name-correction pipeline synchronously, then yields the
+    final answer as a stream of small events instead of one blocking call:
+      {"type": "meta", "steps": [...], "is_confidential": bool}  -- once, first
+      {"type": "token", "content": "..."}                         -- repeated
+      {"type": "done"}                                            -- once, last
+    For blocked/error/empty-result paths (answer already fully known,
+    nothing to actually stream), the whole answer is sent as a single
+    "token" event so the frontend's handling stays uniform.
+    """
+    steps = []
+    print(f"[ask_question_stream] role={role}, question={question!r}")
+
+    history_text = format_conversation_history(history)
+    resolved_question = resolve_followup_question(question, history_text)
+    if resolved_question != question:
+        print(f"[ask_question_stream] resolved follow-up: {question!r} -> {resolved_question!r}")
+
+    def _finish(answer, is_confidential, steps_):
+        yield {"type": "meta", "steps": steps_, "is_confidential": is_confidential}
+        yield {"type": "token", "content": answer}
+        yield {"type": "done"}
+
+    risk_category = run_security_checks(resolved_question, role=role)
+    manager_override = (role == "manager" and risk_category == "INDIVIDUAL_PERSONAL_DATA")
+
+    if risk_category != "SAFE" and not manager_override:
+        print(f"[SECURITY] Blocked question (category={risk_category}): {question}")
+        message = REFUSAL_MESSAGES.get(risk_category, "این سوال به دلایل امنیتی قابل پردازش نیست.")
+        log_audit_event(username, role, risk_category, question, was_blocked=True)
+        yield from _finish(message, risk_category in CONFIDENTIAL_CATEGORIES, [])
+        return
+
+    is_complex = classify_question_complexity(resolved_question)
+    manager_individual_lookup = (role == "manager" and is_individual_employee_question(resolved_question))
+
+    try:
+        if not is_complex or manager_individual_lookup:
+            sql = generate_sql(resolved_question, role=role)
+
+            if "REFUSED_INDIVIDUAL_LOOKUP" in sql or check_sql_for_privacy_risk(sql, role=role):
+                print(f"[SECURITY] Blocked generated SQL (privacy risk): {sql}")
+                log_audit_event(username, role, "INDIVIDUAL_PERSONAL_DATA", question, was_blocked=True)
+                yield from _finish(REFUSAL_MESSAGES["INDIVIDUAL_PERSONAL_DATA"], True, [])
+                return
+
+            role_risk = check_role_sql_restriction(role, sql)
+            if role_risk != "SAFE":
+                print(f"[SECURITY] Blocked by role restriction (role={role}): {sql}")
+                log_audit_event(username, role, role_risk, question, was_blocked=True)
+                yield from _finish(REFUSAL_MESSAGES[role_risk], role_risk in CONFIDENTIAL_CATEGORIES, [])
+                return
+
+            result = run_sql(sql)
+
+            if manager_individual_lookup and is_empty_sql_result(result):
+                corrected_sql = correct_name_spelling_in_sql(sql)
+                if corrected_sql != sql:
+                    print(f"[NAME CORRECTION] retrying with corrected SQL: {corrected_sql}")
+                    sql = corrected_sql
+                    result = run_sql(sql)
+
+            steps.append({"label": "پرس‌وجوی داده", "sql": sql.strip(), "result": str(result)})
+
+            if isinstance(result, str) and result.startswith("SQL_ERROR"):
+                answer = "متاسفانه اجرای این پرس‌وجو با خطا مواجه شد و داده‌ای برای پاسخ در دسترس نیست."
+                log_audit_event(username, role, "SAFE", question, was_blocked=False)
+                yield from _finish(answer, manager_individual_lookup, steps)
+                return
+
+            if is_empty_sql_result(result):
+                answer = (
+                    "با این مشخصات (نام/نام خانوادگی)، رکوردی در پایگاه‌داده یافت نشد. "
+                    "لطفاً از صحت نام و نام خانوادگی اطمینان حاصل کنید."
+                )
+                log_audit_event(username, role, "SAFE", question, was_blocked=False)
+                yield from _finish(answer, manager_individual_lookup, steps)
+                return
+
+            context = (
+                f"SQL query used:\n{sql}\n\nRaw result from database:\n{result}\n\n"
+                f"(Use the column order in the SELECT clause above to correctly map "
+                f"each value to its column.)"
+            )
+            yield {"type": "meta", "steps": steps, "is_confidential": manager_individual_lookup}
+            for token in generate_final_answer_stream(resolved_question, [context]):
+                yield {"type": "token", "content": token}
+            log_audit_event(username, role, "SAFE", question, was_blocked=False)
+            yield {"type": "done"}
+            return
+
+        else:
+            topics = detect_question_topics(resolved_question)
+            context_blocks = []
+
+            if "production" in topics:
+                result1 = run_sql(FIXED_RECOVERY_DOWNTIME_QUERY)
+                stats1 = compute_comparison_stats(result1) or f"[Query failed: {result1}]"
+                steps.append({"label": "مقایسه نرخ بازیابی و توقف بین معادن",
+                              "sql": FIXED_RECOVERY_DOWNTIME_QUERY.strip(), "result": str(result1)})
+                context_blocks.append(f"Production/Recovery/Downtime comparison across mines:\n{stats1}")
+
+            if "equipment" in topics:
+                result2 = run_sql(FIXED_EQUIPMENT_STATUS_QUERY)
+                stats2 = compute_equipment_status_breakdown(result2) or f"[Query failed: {result2}]"
+                steps.append({"label": "وضعیت تجهیزات بر اساس معدن",
+                              "sql": FIXED_EQUIPMENT_STATUS_QUERY.strip(), "result": str(result2)})
+                context_blocks.append(f"Equipment status breakdown by mine:\n{stats2}")
+
+            if "workforce" in topics:
+                if role == "staff":
+                    steps.append({"label": "نیروی انسانی بر اساس معدن (محدود شده بر اساس نقش)",
+                                  "sql": "-- blocked: staff role cannot access salary data",
+                                  "result": "ROLE_RESTRICTED_SALARY"})
+                    context_blocks.append(
+                        "Workforce/salary data: NOT retrieved for this user, because their "
+                        "access role (staff) is restricted from all salary data, even in "
+                        "aggregate/average form. Do not state or estimate any salary figures. "
+                        "If the question asked about salary, explicitly say this data is "
+                        "restricted for the current access level, in Persian."
+                    )
+                else:
+                    result3 = run_sql(FIXED_WORKFORCE_QUERY)
+                    stats3 = compute_workforce_stats(result3) or f"[Query failed: {result3}]"
+                    steps.append({"label": "نیروی انسانی بر اساس معدن",
+                                  "sql": FIXED_WORKFORCE_QUERY.strip(), "result": str(result3)})
+                    context_blocks.append(f"Workforce (employee count and average salary) by mine:\n{stats3}")
+
+            if not context_blocks:
+                context_blocks.append("No relevant data could be retrieved for this question.")
+
+            yield {"type": "meta", "steps": steps, "is_confidential": False}
+            for token in generate_final_answer_stream(resolved_question, context_blocks):
+                yield {"type": "token", "content": token}
+            log_audit_event(username, role, "SAFE", question, was_blocked=False)
+            yield {"type": "done"}
+            return
+
+    except Exception as e:
+        log_audit_event(username, role, "ERROR", question, was_blocked=False)
+        yield from _finish(f"خطا در پردازش سوال: {str(e)}", False, steps)
