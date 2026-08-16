@@ -18,6 +18,8 @@ type SidebarProps = {
   onNewConversation: () => void
   onLogout: () => void
   refreshKey: number
+  isMobileOpen: boolean
+  onMobileClose: () => void
 }
 
 export function Sidebar({
@@ -27,6 +29,8 @@ export function Sidebar({
   onNewConversation,
   onLogout,
   refreshKey,
+  isMobileOpen,
+  onMobileClose,
 }: SidebarProps) {
   const [sessions, setSessions] = useState<SessionSummary[]>([])
 
@@ -41,11 +45,36 @@ export function Sidebar({
     if (activeSessionId === sessionId) onNewConversation()
   }
 
+  const handleSelectMobile = (id: string) => {
+    onSelectSession(id)
+    onMobileClose()
+  }
+
+  const handleNewConversationMobile = () => {
+    onNewConversation()
+    onMobileClose()
+  }
+
   return (
-    <aside
-      className="hidden md:flex w-72 shrink-0 flex-col border-l border-neutral-800/80 bg-neutral-950/60 backdrop-blur-sm"
-      dir="rtl"
-    >
+    <>
+      {/* Mobile overlay backdrop — only rendered/visible when the drawer is open */}
+      {isMobileOpen && (
+        <div
+          className="fixed inset-0 bg-black/60 z-40 md:hidden"
+          onClick={onMobileClose}
+        />
+      )}
+
+      <aside
+        className={`
+          fixed md:static top-0 bottom-0 right-0 z-50
+          w-72 shrink-0 flex flex-col border-l border-neutral-800/80 bg-neutral-950 md:bg-neutral-950/60 backdrop-blur-sm
+          transition-transform duration-300 ease-in-out
+          ${isMobileOpen ? 'translate-x-0' : 'translate-x-full md:translate-x-0'}
+          md:flex
+        `}
+        dir="rtl"
+      >
       <div className="p-4 space-y-4">
         <div className="flex items-center gap-2.5 px-1">
           <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-[#E08A4F] to-[#8B4A28] flex items-center justify-center shadow-[0_0_15px_-3px_rgba(224,138,79,0.6)]">
@@ -55,7 +84,7 @@ export function Sidebar({
         </div>
 
         <button
-          onClick={onNewConversation}
+          onClick={handleNewConversationMobile}
           className="w-full flex items-center justify-center gap-2 h-10 rounded-lg bg-[#B5723A] hover:bg-[#8B4A28] text-white text-sm font-medium transition-colors"
         >
           <Plus size={16} />
@@ -69,7 +98,7 @@ export function Sidebar({
         {sessions.map((s) => (
           <button
             key={s.session_id}
-            onClick={() => onSelectSession(s.session_id)}
+            onClick={() => handleSelectMobile(s.session_id)}
             className={`group w-full flex items-center gap-2 px-2.5 py-2 rounded-lg text-sm text-right transition-colors ${
               activeSessionId === s.session_id
                 ? 'bg-[#E08A4F]/12 text-white border border-[#E08A4F]/30'
@@ -103,5 +132,6 @@ export function Sidebar({
         <p className="font-en text-[10px] text-neutral-700 text-center pt-1">Rad AI v0.1 · Prototype</p>
       </div>
     </aside>
+    </>
   )
 }
