@@ -1,5 +1,7 @@
 'use client'
 
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import { ChatMessage as ChatMessageType } from '@/lib/types'
 import { TechnicalDetails } from './technical-details'
 import { AlertTriangle } from 'lucide-react'
@@ -48,7 +50,23 @@ export function ChatMessageItem({
               خطا در پردازش
             </div>
           )}
-          <div className="whitespace-pre-wrap break-words">{message.content}</div>
+
+          {isUser ? (
+            <div className="whitespace-pre-wrap break-words">{message.content}</div>
+          ) : (
+            <div className="prose prose-invert prose-sm max-w-none break-words
+              prose-headings:text-white prose-headings:font-semibold prose-headings:mb-2 prose-headings:mt-3
+              prose-h1:text-lg prose-h2:text-base prose-h3:text-sm
+              prose-p:text-neutral-100 prose-p:leading-7 prose-p:my-1.5
+              prose-strong:text-[#F0A868] prose-strong:font-semibold
+              prose-ul:my-2 prose-ol:my-2 prose-li:text-neutral-100 prose-li:my-0.5
+              prose-table:text-xs prose-th:text-neutral-300 prose-td:text-neutral-100
+              prose-code:text-[#E08A4F] prose-code:bg-black/30 prose-code:px-1 prose-code:py-0.5 prose-code:rounded
+              prose-hr:border-neutral-700">
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
+            </div>
+          )}
+
           {!isUser && showTechnical && <TechnicalDetails steps={message.steps} />}
         </div>
       </div>

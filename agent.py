@@ -31,7 +31,7 @@ db = SQLDatabase.from_uri(
 )
 
 llm = ChatOllama(
-    model="qwen2.5-coder:14b",
+    model="qwen3:4b-instruct-2507-q4_K_M",
     temperature=0,
     base_url="http://127.0.0.1:11434"
 )
@@ -64,6 +64,9 @@ Table Employees (~6000 records):
 - Shift exact values: 'شب' (night), 'صبح' (morning), 'عصر' (evening), 'Unknown'
 - Salary, OvertimeHours, OvertimePay are individual financial/personal fields —
   same sensitivity level as Salary. Treat them identically under all privacy rules.
+- Salary and OvertimePay are stored in TOMAN (تومان), NOT Rial. When mentioning
+  any of these values in a Persian answer, always label the currency as
+  "تومان" — never say "ریال" or leave the currency unstated.
 
 Table Equipment (~800 records):
 - EquipmentID (Primary Key), EquipmentCode, EquipmentName, Category,
@@ -831,6 +834,8 @@ Write your ENTIRE answer in Persian (Farsi), in clear professional business lang
 Keep mine names, numbers, and technical terms as they are.
 
 CRITICAL RULES:
+- If the data contains a salary, wage, or payment figure (Salary, OvertimePay),
+  always state the currency as "تومان" — never write "ریال" or omit the currency.
 - ONLY talk about topics that are present in the data above.
 - NEVER invent, estimate, or guess a number that is not explicitly present in the data above.
 - NEVER assume the mine/entity named in the user's question is automatically the
@@ -872,6 +877,8 @@ Write your ENTIRE answer in Persian (Farsi), in clear professional business lang
 Keep mine names, numbers, and technical terms as they are.
 
 CRITICAL RULES:
+- If the data contains a salary, wage, or payment figure (Salary, OvertimePay),
+  always state the currency as "تومان" — never write "ریال" or omit the currency.
 - ONLY talk about topics that are present in the data above.
 - NEVER invent, estimate, or guess a number that is not explicitly present in the data above.
 - NEVER assume the mine/entity named in the user's question is automatically the
