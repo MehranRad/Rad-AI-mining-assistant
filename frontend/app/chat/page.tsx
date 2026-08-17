@@ -56,6 +56,7 @@ export default function ChatPage() {
 
   const handleLogout = () => {
     localStorage.removeItem('rad_ai_user')
+    localStorage.removeItem('rad_ai_token')
     router.push('/')
   }
 
@@ -76,7 +77,7 @@ export default function ChatPage() {
       return [...prev, { role: 'assistant', content: '' }]
     })
 
-    await askQuestionStream(question, user.role, user.username, recentHistory, {
+    await askQuestionStream(question, recentHistory, {
       onMeta: (steps, isConfidential) => {
         finalSteps = steps
         finalConfidential = isConfidential
@@ -95,7 +96,7 @@ export default function ChatPage() {
         if (!finalConfidential) {
           let activeSessionId = sessionId
           if (activeSessionId === null) {
-            const created = await createSession(question, user.user_id)
+            const created = await createSession(question)
             activeSessionId = created.session_id
             setSessionId(activeSessionId)
             setSidebarRefreshKey((k) => k + 1)
@@ -118,7 +119,7 @@ export default function ChatPage() {
   if (!user) return null
 
   return (
-    <div className="min-h-screen w-full flex">
+    <div className="h-screen w-full flex overflow-hidden">
       <Sidebar
         user={user}
         activeSessionId={sessionId}
@@ -130,14 +131,14 @@ export default function ChatPage() {
         onMobileClose={() => setIsMobileSidebarOpen(false)}
       />
 
-      <div className="flex-1 flex flex-col min-w-0">
+      <div className="flex-1 flex flex-col min-w-0 h-full overflow-hidden">
         <ChatHeader
           showTechnical={showTechnical}
           onToggleTechnical={setShowTechnical}
           onOpenSidebar={() => setIsMobileSidebarOpen(true)}
         />
 
-        <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 md:px-8 py-6">
+        <div ref={scrollRef} className="flex-1 min-h-0 overflow-y-auto px-4 md:px-8 py-6">
           <div className="max-w-3xl mx-auto">
             {messages.length === 0 && !isLoading && (
               <>

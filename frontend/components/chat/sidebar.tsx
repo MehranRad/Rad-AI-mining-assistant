@@ -68,6 +68,7 @@ export function Sidebar({
       <aside
         className={`
           fixed md:static top-0 bottom-0 right-0 z-50
+          h-screen md:h-full
           w-72 shrink-0 flex flex-col border-l border-neutral-800/80 bg-neutral-950 md:bg-neutral-950/60 backdrop-blur-sm
           transition-transform duration-300 ease-in-out
           ${isMobileOpen ? 'translate-x-0' : 'translate-x-full md:translate-x-0'}
@@ -75,7 +76,7 @@ export function Sidebar({
         `}
         dir="rtl"
       >
-      <div className="p-4 space-y-4">
+      <div className="shrink-0 p-4 space-y-4">
         <div className="flex items-center gap-2.5 px-1">
           <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-[#E08A4F] to-[#8B4A28] flex items-center justify-center shadow-[0_0_15px_-3px_rgba(224,138,79,0.6)]">
             <span className="font-en text-white font-bold text-xs">Rad</span>
@@ -92,7 +93,7 @@ export function Sidebar({
         </button>
       </div>
 
-      <div className="flex-1 overflow-y-auto px-3 space-y-1">
+      <div className="flex-1 min-h-0 overflow-y-auto px-3 space-y-1">
         <p className="text-[11px] text-neutral-500 px-2 mb-2 font-medium">گفتگوها</p>
         {sessions.length === 0 && <p className="text-xs text-neutral-600 px-2">هنوز گفتگویی ثبت نشده</p>}
         {sessions.map((s) => (
@@ -117,7 +118,7 @@ export function Sidebar({
         ))}
       </div>
 
-      <div className="p-4 border-t border-neutral-800/80 space-y-3">
+      <div className="shrink-0 p-4 border-t border-neutral-800/80 space-y-3">
         <div className="px-1">
           <p className="text-sm text-neutral-200 font-medium">{user.username}</p>
           <p className="text-xs text-neutral-500">{roleLabels[user.role] || user.role}</p>

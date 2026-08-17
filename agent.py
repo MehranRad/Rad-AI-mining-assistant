@@ -36,6 +36,20 @@ llm = ChatOllama(
     base_url="http://127.0.0.1:11434"
 )
 
+# The final-answer synthesis step (combining several precomputed Persian
+# data blocks into one coherent answer) needs more reliability than SQL
+# generation/classification — a small 4B model was observed to invent
+# field names, shift digits (25,139,553,834 -> 251,395,538,340), and
+# corrupt Persian words during this step. A separate, larger model is
+# used ONLY for this final synthesis; SQL generation/classification keep
+# using the fast small model above, since they don't need this precision.
+# Override with the FINAL_ANSWER_MODEL env var if you want to test others.
+llm_final = ChatOllama(
+    model=os.getenv("FINAL_ANSWER_MODEL", "qwen2.5-coder:14b"),
+    temperature=0,
+    base_url="http://127.0.0.1:11434"
+)
+
 TABLE_CONTEXT = """
 Table Employees (~6000 records):
 - EmployeeID (Primary Key), FirstName, LastName, Gender, Age,
@@ -64,6 +78,24 @@ Table Employees (~6000 records):
 - Shift exact values: 'شب' (night), 'صبح' (morning), 'عصر' (evening), 'Unknown'
 - Salary, OvertimeHours, OvertimePay are individual financial/personal fields —
   same sensitivity level as Salary. Treat them identically under all privacy rules.
+- IMPORTANT: OvertimeHours and OvertimePay belong ONLY to the Employees table.
+  Production does NOT have these columns — never write p.OvertimeHours or
+  similar. If a question needs to compare an Employees-side aggregate (like
+  total overtime) against a Production-side aggregate (like total downtime)
+  ACROSS MINES, do NOT join the raw tables row-by-row (this multiplies/
+  double-counts, since one employee appears in many production rows).
+  Instead use two pre-aggregated subqueries joined by Mine, for example:
+  SELECT p.Mine, p.TotalDowntime, e.TotalOvertime
+  FROM (SELECT Mine, SUM(DowntimeHours) AS TotalDowntime FROM Production GROUP BY Mine) p
+  JOIN (SELECT Mine, SUM(OvertimeHours) AS TotalOvertime FROM Employees GROUP BY Mine) e
+  ON p.Mine = e.Mine
+  WRONG (never do this): SELECT e.Mine, SUM(e.OvertimeHours), SUM(p.DowntimeHours)
+  FROM Employees e JOIN Production p ON e.Mine = p.Mine GROUP BY e.Mine
+  — this joins every employee row to every production row of the same mine,
+  multiplying and wildly inflating both sums (you would see absurd totals
+  like hundreds of millions of hours). ALWAYS pre-aggregate each table
+  SEPARATELY first (as in the CORRECT example above), then join the two
+  already-small aggregated results by Mine.
 - Salary and OvertimePay are stored in TOMAN (تومان), NOT Rial. When mentioning
   any of these values in a Persian answer, always label the currency as
   "تومان" — never say "ریال" or leave the currency unstated.
@@ -239,7 +271,12 @@ def classify_security_risk(question: str) -> str:
 company's internal database into EXACTLY ONE of these categories:
 
 SAFE - a normal business question about aggregate/statistical data (counts, averages, sums,
-       comparisons BETWEEN GROUPS like mines or departments — not about one individual)
+       comparisons BETWEEN GROUPS like mines or departments — not about one individual).
+       IMPORTANT: a question asking for an AVERAGE, TOTAL, or COUNT related to salary/age/
+       any personal field (e.g. "میانگین حقوق", "متوسط سن", "average salary in production")
+       is ALWAYS SAFE, even though it mentions a sensitive field name — averaging across a
+       whole department/group does not reveal any one individual's data. Only classify as
+       INDIVIDUAL_PERSONAL_DATA when the question targets ONE specific person.
 INDIVIDUAL_PERSONAL_DATA - asks about one specific named person's data, OR tries to identify
        a single individual indirectly (e.g. "who has the lowest/highest salary", "the youngest
        employee", "which employee earns the least") — these single out one person's record
@@ -289,8 +326,14 @@ def regex_security_check(question: str) -> str:
     )
     has_sensitive_topic = any(w in q_lower for w in SENSITIVE_TOPIC_WORDS)
     has_name_pattern = bool(re.search(r"\b[A-Z][a-z]+\s+[A-Z][a-z]+\b", question))
+    # Reuse the same refined logic as is_individual_employee_question:
+    # a superlative ("بیشترین"/"کمترین") only counts as singling out an
+    # INDIVIDUAL when paired with explicit employee/person context —
+    # otherwise ordinary mine-level comparisons (e.g. "کدام معدن بیشترین
+    # اضافه‌کاری را دارد؟") get wrongly blocked/misrouted.
     has_singling_out = (
-        any(w in question for w in SINGLING_OUT_WORDS_FA)
+        any(w in question for w in STRONG_SINGLING_OUT_FA)
+        or (any(w in question for w in GENERIC_SUPERLATIVE_FA) and any(w in question for w in EMPLOYEE_CONTEXT_WORDS_FA))
         or any(w in q_lower for w in SINGLING_OUT_WORDS_EN)
     )
 
@@ -328,8 +371,13 @@ def is_individual_employee_question(question: str) -> bool:
     # A generic superlative ("بیشترین"/"کمترین") only counts as singling
     # out an INDIVIDUAL when it's actually paired with employee/personal
     # context — otherwise it's just comparing mines, equipment, etc.
+    # A sensitive FIELD NAME (like "اضافه‌کاری") appearing alongside a
+    # generic superlative is NOT enough on its own — that pattern also
+    # matches perfectly ordinary mine-level comparisons like "کدام معدن
+    # بیشترین اضافه‌کاری را دارد؟". Only an explicit EMPLOYEE/PERSON
+    # context word turns a superlative into a single-individual lookup.
     has_singling_out = has_strong_singling_out or (
-        has_generic_superlative and (has_employee_context or has_sensitive_topic)
+        has_generic_superlative and has_employee_context
     )
 
     has_persian_name_question = bool(re.search(r"(حقوق|سن|تاریخ استخدام)\s+.*\s+چقدر", question))
@@ -780,6 +828,41 @@ def compute_workforce_stats(raw_result):
         )
     return "\n".join(lines)
 
+def compute_production_per_workforce_ratio(production_raw, workforce_raw):
+    """
+    For questions combining production output with workforce size (e.g.
+    "which mine produces the most relative to its headcount"), this is a
+    genuinely NEW metric that doesn't exist as a raw column — it must be
+    computed here in Python, never left for the LLM to approximate from
+    two separate unrelated numbers (which caused it to previously mislabel
+    MaleCount as "production").
+    """
+    try:
+        prod_rows = ast.literal_eval(production_raw) if isinstance(production_raw, str) else production_raw
+        wf_rows = ast.literal_eval(workforce_raw) if isinstance(workforce_raw, str) else workforce_raw
+        prod_by_mine = {r[0]: float(r[6]) for r in prod_rows}   # AvgCopperOreTon
+        wf_by_mine = {r[0]: int(r[1]) for r in wf_rows}          # EmployeeCount
+    except Exception:
+        return None
+
+    ratios = []
+    for mine, ore in prod_by_mine.items():
+        count = wf_by_mine.get(mine)
+        if count:
+            ratios.append((mine, ore / count))
+    if not ratios:
+        return None
+    ratios.sort(key=lambda x: x[1], reverse=True)
+
+    lines = [
+        "Production output per employee (AvgCopperOreTon ÷ EmployeeCount per "
+        "mine) — precomputed, use these EXACT numbers verbatim, do not "
+        "recompute or approximate:"
+    ]
+    for mine, ratio in ratios:
+        lines.append(f"- {mine}: {ratio:.3f} tons of ore (avg) per employee")
+    lines.append(f"HIGHEST output-per-employee mine: {ratios[0][0]}")
+    return "\n".join(lines)
 
 def classify_question_complexity(question: str) -> bool:
     try:
@@ -806,7 +889,7 @@ def detect_question_topics(question: str) -> set:
     topics = set()
     equipment_keywords = ["تجهیزات", "ماشین", "وضعیت", "equipment", "status",
                           "running", "maintenance", "stopped", "تعمیر", "متوقف", "فعال"]
-    production_keywords = ["بازیابی", "توقف", "recovery", "downtime", "production",
+    production_keywords = ["بازیابی", "توقف", "تولید", "recovery", "downtime", "production",
                             "نرخ", "سنگ", "کنسانتره", "ساعت کار", "انرژی", "سوخت"]
     workforce_keywords = ["کارمند", "حقوق", "نیروی", "پرسنل", "employee", "salary",
                            "workforce", "استخدام", "شیفت", "دپارتمان", "شغل"]
@@ -834,10 +917,22 @@ Write your ENTIRE answer in Persian (Farsi), in clear professional business lang
 Keep mine names, numbers, and technical terms as they are.
 
 CRITICAL RULES:
+CRITICAL RULES:
 - If the data contains a salary, wage, or payment figure (Salary, OvertimePay),
   always state the currency as "تومان" — never write "ریال" or omit the currency.
 - ONLY talk about topics that are present in the data above.
 - NEVER invent, estimate, or guess a number that is not explicitly present in the data above.
+- NEVER invent a field/metric name that is not literally present in the data above
+  (e.g. do not say "OvertimePay" or "تولید" if no such value was given to you —
+  only refer to fields that are explicitly labeled in the data blocks).
+- COPY every number EXACTLY as given — same digits, same magnitude. Never add,
+  drop, or shift digits (e.g. do not turn 25,139,553,834 into 251,395,538,340).
+- If a line starting with "IMPORTANT — verified facts" is present in the data,
+  treat every number/entity in it as ALREADY CORRECT and FINAL — quote it
+  directly, never recompute it yourself or produce a different number for the
+  same comparison.
+- When describing a difference in percentage points, say "واحد درصد" or
+  "امتیاز درصد" — never translate "points" as "پیوند".
 - NEVER assume the mine/entity named in the user's question is automatically the
   "highest" or "lowest" on any metric — always verify this against the actual
   ranking given in the data before making such a claim.
@@ -850,7 +945,7 @@ CRITICAL RULES:
 - Be concise. Do not add unnecessary sections.
 - Write the final answer ONLY in Persian."""
     try:
-        response = llm.invoke(prompt)
+        response = llm_final.invoke(prompt)
         return response.content.strip()
     except Exception as e:
         return (
@@ -877,10 +972,22 @@ Write your ENTIRE answer in Persian (Farsi), in clear professional business lang
 Keep mine names, numbers, and technical terms as they are.
 
 CRITICAL RULES:
+CRITICAL RULES:
 - If the data contains a salary, wage, or payment figure (Salary, OvertimePay),
   always state the currency as "تومان" — never write "ریال" or omit the currency.
 - ONLY talk about topics that are present in the data above.
 - NEVER invent, estimate, or guess a number that is not explicitly present in the data above.
+- NEVER invent a field/metric name that is not literally present in the data above
+  (e.g. do not say "OvertimePay" or "تولید" if no such value was given to you —
+  only refer to fields that are explicitly labeled in the data blocks).
+- COPY every number EXACTLY as given — same digits, same magnitude. Never add,
+  drop, or shift digits (e.g. do not turn 25,139,553,834 into 251,395,538,340).
+- If a line starting with "IMPORTANT — verified facts" is present in the data,
+  treat every number/entity in it as ALREADY CORRECT and FINAL — quote it
+  directly, never recompute it yourself or produce a different number for the
+  same comparison.
+- When describing a difference in percentage points, say "واحد درصد" or
+  "امتیاز درصد" — never translate "points" as "پیوند".
 - NEVER assume the mine/entity named in the user's question is automatically the
   "highest" or "lowest" on any metric — always verify this against the actual
   ranking given in the data before making such a claim.
@@ -893,7 +1000,7 @@ CRITICAL RULES:
 - Be concise. Do not add unnecessary sections.
 - Write the final answer ONLY in Persian."""
     try:
-        for chunk in llm.stream(prompt):
+        for chunk in llm_final.stream(prompt):
             content = getattr(chunk, "content", "")
             if content:
                 yield content
@@ -990,6 +1097,8 @@ def ask_question(question: str, role: str = "staff", username: str = "unknown",
 
         else:
             topics = detect_question_topics(resolved_question)
+            production_result_for_ratio = None
+            workforce_result_for_ratio = None
             context_blocks = []
 
             if "production" in topics:
@@ -998,6 +1107,7 @@ def ask_question(question: str, role: str = "staff", username: str = "unknown",
                 steps.append({"label": "مقایسه نرخ بازیابی و توقف بین معادن",
                               "sql": FIXED_RECOVERY_DOWNTIME_QUERY.strip(), "result": str(result1)})
                 context_blocks.append(f"Production/Recovery/Downtime comparison across mines:\n{stats1}")
+                production_result_for_ratio = result1
 
             if "equipment" in topics:
                 result2 = run_sql(FIXED_EQUIPMENT_STATUS_QUERY)
@@ -1007,7 +1117,7 @@ def ask_question(question: str, role: str = "staff", username: str = "unknown",
                 context_blocks.append(f"Equipment status breakdown by mine:\n{stats2}")
 
             if "workforce" in topics:
-                if role == "staff":
+                if role == "staff":   
                     print(f"[SECURITY] Skipped FIXED_WORKFORCE_QUERY for role=staff (salary restricted)")
                     steps.append({"label": "نیروی انسانی بر اساس معدن (محدود شده بر اساس نقش)",
                                   "sql": "-- blocked: staff role cannot access salary data",
@@ -1025,6 +1135,14 @@ def ask_question(question: str, role: str = "staff", username: str = "unknown",
                     steps.append({"label": "نیروی انسانی بر اساس معدن",
                                   "sql": FIXED_WORKFORCE_QUERY.strip(), "result": str(result3)})
                     context_blocks.append(f"Workforce (employee count and average salary) by mine:\n{stats3}")
+                    workforce_result_for_ratio = result3
+
+            if production_result_for_ratio is not None and workforce_result_for_ratio is not None:
+                ratio_block = compute_production_per_workforce_ratio(
+                    production_result_for_ratio, workforce_result_for_ratio
+                )
+                if ratio_block:
+                    context_blocks.append(ratio_block)
 
             if not context_blocks:
                 context_blocks.append("No relevant data could be retrieved for this question.")
@@ -1134,6 +1252,8 @@ def ask_question_stream(question: str, role: str = "staff", username: str = "unk
 
         else:
             topics = detect_question_topics(resolved_question)
+            production_result_for_ratio = None
+            workforce_result_for_ratio = None
             context_blocks = []
 
             if "production" in topics:
@@ -1142,6 +1262,7 @@ def ask_question_stream(question: str, role: str = "staff", username: str = "unk
                 steps.append({"label": "مقایسه نرخ بازیابی و توقف بین معادن",
                               "sql": FIXED_RECOVERY_DOWNTIME_QUERY.strip(), "result": str(result1)})
                 context_blocks.append(f"Production/Recovery/Downtime comparison across mines:\n{stats1}")
+                production_result_for_ratio = result1
 
             if "equipment" in topics:
                 result2 = run_sql(FIXED_EQUIPMENT_STATUS_QUERY)
@@ -1168,6 +1289,14 @@ def ask_question_stream(question: str, role: str = "staff", username: str = "unk
                     steps.append({"label": "نیروی انسانی بر اساس معدن",
                                   "sql": FIXED_WORKFORCE_QUERY.strip(), "result": str(result3)})
                     context_blocks.append(f"Workforce (employee count and average salary) by mine:\n{stats3}")
+                    workforce_result_for_ratio = result3
+
+            if production_result_for_ratio is not None and workforce_result_for_ratio is not None:
+                ratio_block = compute_production_per_workforce_ratio(
+                    production_result_for_ratio, workforce_result_for_ratio
+                )
+                if ratio_block:
+                    context_blocks.append(ratio_block)
 
             if not context_blocks:
                 context_blocks.append("No relevant data could be retrieved for this question.")

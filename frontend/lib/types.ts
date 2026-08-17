@@ -22,3 +22,8 @@ export type StoredUser = {
   username: string
   role: string
 }
+
+export type AuthSession = {
+  token: string
+  user: StoredUser
+}
