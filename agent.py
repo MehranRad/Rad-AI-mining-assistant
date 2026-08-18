@@ -199,6 +199,30 @@ JOIN (SELECT Mine, COUNT(EquipmentID) AS ActiveEquipmentCount
 ON p.Mine = e.Mine
 """
 
+# For TOTAL/sum production questions ("مجموع کل ساعات توقف ...") — sums every
+# production record so the model never answers a TOTAL question with the AVG
+# figures from the comparison block. All arithmetic done here in Python.
+FIXED_PRODUCTION_TOTALS_QUERY = """
+SELECT SUM(DowntimeHours) AS TotalDowntimeHours,
+       SUM(WorkingHours) AS TotalWorkingHours,
+       SUM(EnergyConsumption) AS TotalEnergyConsumption,
+       SUM(FuelConsumption) AS TotalFuelConsumption,
+       SUM(CopperOreTon) AS TotalCopperOreTon,
+       SUM(CopperConcentrateTon) AS TotalCopperConcentrateTon
+FROM Production
+"""
+
+# For Manufacturer questions ("کدام تولیدکننده گران‌ترین تجهیزات را دارد؟") —
+# average purchase price grouped by the Equipment.Manufacturer column (English).
+FIXED_EQUIPMENT_MANUFACTURER_QUERY = """
+SELECT Manufacturer,
+       AVG(PurchasePrice) AS AvgPurchasePrice,
+       COUNT(EquipmentID) AS EquipmentCount
+FROM Equipment
+GROUP BY Manufacturer
+ORDER BY AVG(PurchasePrice) DESC
+"""
+
 REFUSAL_MESSAGES = {
     "INDIVIDUAL_PERSONAL_DATA": (
         "این سوال به دنبال اطلاعات شخصی و محرمانه یک فرد مشخص (مانند حقوق، سن، یا تاریخ استخدام) "
@@ -747,7 +771,10 @@ def compute_comparison_stats(raw_result):
         f"'the highest' — do not assume the mine named in the question is "
         f"automatically the extreme case.",
         "",
-        "Recovery rate ranking (highest to lowest), with ALL relevant "
+        "Production comparison by mine — NOTE: every value below is an "
+        "AVERAGE per mine (AVG over Production records), NOT a total. A TOTAL "
+        "question can ONLY be answered from a block explicitly labeled TOTALS "
+        "or SUM. Recovery rate ranking (highest to lowest), with all relevant "
         "production fields and precomputed differences (fields used: "
         "RecoveryRate, DowntimeHours, WorkingHours, EnergyConsumption, "
         "FuelConsumption, CopperOreTon, CopperConcentrateTon):"
@@ -758,17 +785,17 @@ def compute_comparison_stats(raw_result):
         energy_diff = s["energy"] - max_energy["energy"]
         fuel_diff = s["fuel"] - max_fuel["fuel"]
         lines.append(
-            f"- {s['mine']}: Recovery Rate = {s['recovery']:.2f}% "
+            f"- {s['mine']}: Avg Recovery Rate = {s['recovery']:.2f}% "
             f"(diff from highest = {recovery_diff:.2f} pts); "
-            f"Downtime = {s['downtime']:.2f}h "
+            f"Avg Downtime = {s['downtime']:.2f}h "
             f"(diff from lowest = {downtime_diff:.2f}h); "
-            f"Working Hours = {s['working_hours']:.2f}h; "
-            f"Energy Consumption = {s['energy']:.2f} "
+            f"Avg Working Hours = {s['working_hours']:.2f}h; "
+            f"Avg Energy Consumption = {s['energy']:.2f} "
             f"(diff from highest = {energy_diff:.2f}); "
-            f"Fuel Consumption = {s['fuel']:.2f} "
+            f"Avg Fuel Consumption = {s['fuel']:.2f} "
             f"(diff from highest = {fuel_diff:.2f}); "
-            f"Copper Ore = {s['ore_ton']:.2f}t; "
-            f"Copper Concentrate = {s['concentrate_ton']:.2f}t"
+            f"Avg Copper Ore = {s['ore_ton']:.2f}t; "
+            f"Avg Copper Concentrate = {s['concentrate_ton']:.2f}t"
         )
     return "\n".join(lines)
 
@@ -936,6 +963,90 @@ def compute_production_per_active_equipment_ratio(raw_result):
     return "\n".join(lines)
 
 
+def is_total_production_question(question: str) -> bool:
+    """True for TOTAL/SUM questions about a production field (e.g. "مجموع کل
+    ساعات توقف تجهیزات در تمام معادن چقدر است؟"). Gates the precomputed SUM
+    totals block so it is only produced when a total is genuinely requested —
+    never for average/ranking/comparison questions."""
+    q = question.lower()
+    has_total = any(w in q for w in ["مجموع", "جمع کل", "total", "sum"])
+    has_prod_field = any(
+        w in q for w in ["توقف", "ساعت", "انرژی", "سوخت", "سنگ", "کنسانتره",
+                          "تولید", "بازیابی", "downtime", "energy", "fuel",
+                          "ore", "concentrate", "recovery"]
+    )
+    return has_total and has_prod_field
+
+
+def compute_production_totals(raw_result):
+    """Formats SUM totals across ALL production records. The model must NEVER
+    derive a total from the AVG figures in the comparison block — this is the
+    only sanctioned source for TOTAL answers."""
+    if isinstance(raw_result, str) and raw_result.startswith("SQL_ERROR"):
+        return None
+    try:
+        rows = ast.literal_eval(raw_result) if isinstance(raw_result, str) else raw_result
+        if not isinstance(rows, list) or len(rows) == 0:
+            return None
+        row = rows[0]
+    except Exception:
+        return None
+
+    fields = [
+        (0, "TotalDowntimeHours", "ساعات توقف"),
+        (1, "TotalWorkingHours", "ساعت کار"),
+        (2, "TotalEnergyConsumption", "مصرف انرژی"),
+        (3, "TotalFuelConsumption", "مصرف سوخت"),
+        (4, "TotalCopperOreTon", "سنگ استخراج‌شده"),
+        (5, "TotalCopperConcentrateTon", "کنسانتره"),
+    ]
+    lines = [
+        "TOTALS across ALL mines — these are SUMs over every production record "
+        "(NOT averages, NOT per-mine values). Use ONLY the single field the "
+        "user asked about; ignore the rest:"
+    ]
+    for idx, en_name, fa_name in fields:
+        if idx >= len(row) or row[idx] is None:
+            continue
+        lines.append(f"- {en_name} ({fa_name}): {float(row[idx]):.2f}")
+    return "\n".join(lines)
+
+
+def is_manufacturer_question(question: str) -> bool:
+    """True for questions asking about the Equipment Manufacturer (which brand
+    is most expensive, counts by manufacturer, etc.). Gates the precomputed
+    per-manufacturer price block."""
+    q = question.lower()
+    return any(w in q for w in ["تولیدکننده", "تولیدکنندگان", "سازنده", "manufacturer"])
+
+
+def compute_manufacturer_price_stats(raw_result):
+    """Formats average PurchasePrice per Equipment.Manufacturer (highest
+    first). This is AVERAGE price, so a "total price" question about a
+    manufacturer cannot be answered from this block."""
+    if isinstance(raw_result, str) and raw_result.startswith("SQL_ERROR"):
+        return None
+    try:
+        rows = ast.literal_eval(raw_result) if isinstance(raw_result, str) else raw_result
+        if not isinstance(rows, list) or len(rows) == 0:
+            return None
+    except Exception:
+        return None
+
+    lines = [
+        "Equipment AVERAGE purchase price by Manufacturer (fields used: "
+        "Manufacturer, PurchasePrice) — highest first; values are AVERAGES, "
+        "NOT totals:"
+    ]
+    for mfr, avg_price, count in rows:
+        lines.append(
+            f"- {mfr}: avg price = {float(avg_price):.0f} "
+            f"(equipment count = {int(count)})"
+        )
+    lines.append(f"HIGHEST average purchase price manufacturer: {rows[0][0]}")
+    return "\n".join(lines)
+
+
 def is_production_per_equipment_question(question: str) -> bool:
     """True for questions about production output relative to the number of
     (active) equipment — e.g. "کدام معدن نسبت به تعداد تجهیزات فعالش، بیشترین
@@ -1015,8 +1126,8 @@ CRITICAL RULES:
 3. NEVER include the SQL query, raw database result rows/tuples, Python calculations, or internal details in the answer. No sections titled "جزئیات فنی", "SQL Query", or "Query Result". Present only the final human-readable result.
 4. NEVER state the same conclusion twice. Do not use filler such as "در نتیجه", "بنابراین", "با توجه به داده‌های موجود", "لازم به ذکر است", "نکته مهم" unless they add real value.
 5. NEVER claim statistical significance or correlation ("معنادار", "غیرمعنادار", "از نظر آماری معنادار", "همبستگی", "رابطه علت‌ومعلولی") unless the data above explicitly states that a statistical test was performed. A plain numeric difference is NOT significance — just report the numbers.
-6. NEVER present an average as a total/sum. If the user asked for a total ("مجموع", "کل") but the data provides only averages, say briefly that the total is not available from the provided data instead of presenting an average as the total.
-7. Only talk about data that is literally present above. If the requested information is not in the data (e.g. a field that does not exist), say so briefly and stop; do NOT substitute unrelated metrics.
+6. NEVER present an average as a total/sum. If the user asked for a total ("مجموع", "کل") but the data provides only averages, say briefly that the total is not available from the provided data instead of presenting an average as the total. Data blocks labeled as AVERAGES ("Avg ...") can NEVER be used to answer a TOTAL question — only a block explicitly labeled TOTALS or SUM may be used for totals. Never add up, average, or guess a total from averages.
+7. Only talk about data that is literally present above. If the requested information is not in the data (e.g. a field that does not exist), say so briefly and stop; do NOT substitute unrelated metrics. In particular, if the question asks about a field/column that appears in NO data block above (for example Manufacturer, employee age, or a specific statistic), answer in ONE short Persian sentence that this information is not available in the retrieved data — never approximate it from other columns and never invent it.
 8. COPY every number exactly — never change digits or magnitude. Round reasonably only when the raw value has excessive decimals (e.g. 82.591636 -> 82.59%). Label salary/wage figures as "تومان", RecoveryRate as percent, DowntimeHours as hours. For percentage-point differences say "واحد درصد"/"امتیاز درصد", never "پیوند".
 9. If a line starting with "IMPORTANT — verified facts" is present, treat its numbers as final — quote them directly, never recompute.
 10. If a query failed or is marked unavailable, say so clearly in one sentence.
@@ -1197,6 +1308,24 @@ def ask_question(question: str, role: str = "staff", username: str = "unknown",
                                   "result": str(result_pe)})
                     context_blocks.append(pe_block)
 
+            if "production" in topics and is_total_production_question(resolved_question):
+                result_tot = run_sql(FIXED_PRODUCTION_TOTALS_QUERY)
+                totals_block = compute_production_totals(result_tot)
+                if totals_block:
+                    steps.append({"label": "جمع کل شاخص‌های تولید",
+                                  "sql": FIXED_PRODUCTION_TOTALS_QUERY.strip(),
+                                  "result": str(result_tot)})
+                    context_blocks.append(totals_block)
+
+            if "equipment" in topics and is_manufacturer_question(resolved_question):
+                result_mfr = run_sql(FIXED_EQUIPMENT_MANUFACTURER_QUERY)
+                mfr_block = compute_manufacturer_price_stats(result_mfr)
+                if mfr_block:
+                    steps.append({"label": "قیمت تجهیزات بر اساس تولیدکننده",
+                                  "sql": FIXED_EQUIPMENT_MANUFACTURER_QUERY.strip(),
+                                  "result": str(result_mfr)})
+                    context_blocks.append(mfr_block)
+
             if not context_blocks:
                 context_blocks.append("No relevant data could be retrieved for this question.")
 
@@ -1359,6 +1488,24 @@ def ask_question_stream(question: str, role: str = "staff", username: str = "unk
                                   "sql": FIXED_PRODUCTION_PER_ACTIVE_EQUIPMENT_QUERY.strip(),
                                   "result": str(result_pe)})
                     context_blocks.append(pe_block)
+
+            if "production" in topics and is_total_production_question(resolved_question):
+                result_tot = run_sql(FIXED_PRODUCTION_TOTALS_QUERY)
+                totals_block = compute_production_totals(result_tot)
+                if totals_block:
+                    steps.append({"label": "جمع کل شاخص‌های تولید",
+                                  "sql": FIXED_PRODUCTION_TOTALS_QUERY.strip(),
+                                  "result": str(result_tot)})
+                    context_blocks.append(totals_block)
+
+            if "equipment" in topics and is_manufacturer_question(resolved_question):
+                result_mfr = run_sql(FIXED_EQUIPMENT_MANUFACTURER_QUERY)
+                mfr_block = compute_manufacturer_price_stats(result_mfr)
+                if mfr_block:
+                    steps.append({"label": "قیمت تجهیزات بر اساس تولیدکننده",
+                                  "sql": FIXED_EQUIPMENT_MANUFACTURER_QUERY.strip(),
+                                  "result": str(result_mfr)})
+                    context_blocks.append(mfr_block)
 
             if not context_blocks:
                 context_blocks.append("No relevant data could be retrieved for this question.")

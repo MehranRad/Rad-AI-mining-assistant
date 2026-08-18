@@ -1,22 +1,18 @@
 'use client'
 
 import Image from 'next/image'
-import { Menu, PanelLeft } from 'lucide-react'
+import { Menu } from 'lucide-react'
 
 type ChatHeaderProps = {
   showTechnical: boolean
   onToggleTechnical: (v: boolean) => void
   onOpenSidebar: () => void
-  isSidebarCollapsed: boolean
-  onToggleSidebar: () => void
 }
 
 export function ChatHeader({
   showTechnical,
   onToggleTechnical,
   onOpenSidebar,
-  isSidebarCollapsed,
-  onToggleSidebar,
 }: ChatHeaderProps) {
   return (
     <header
@@ -32,20 +28,6 @@ export function ChatHeader({
         >
           <Menu size={20} />
         </button>
-
-        {/* Expand button — shown only while the desktop sidebar is collapsed.
-            Sits at the top edge of the main content, exactly on the sidebar
-            boundary, so it reads as the collapsed sidebar's re-open control. */}
-        {isSidebarCollapsed && (
-          <button
-            onClick={onToggleSidebar}
-            className="hidden md:flex w-9 h-9 -mr-1 items-center justify-center rounded-lg text-neutral-400 hover:text-white hover:bg-neutral-900 transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#E08A4F]/60"
-            aria-label="باز کردن نوار کناری"
-            title="باز کردن نوار کناری"
-          >
-            <PanelLeft size={20} />
-          </button>
-        )}
 
         <div className="relative w-8 h-8 shrink-0">
           <Image src="/logo.png" alt="Rad AI" width={32} height={32} className="w-8 h-8 object-contain" />

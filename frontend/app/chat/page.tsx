@@ -11,7 +11,7 @@ import { KpiCards } from '@/components/chat/kpi-cards'
 import { ThinkingIndicator } from '@/components/chat/thinking-indicator'
 import { StoredUser, ChatMessage, StepDetail } from '@/lib/types'
 import { askQuestionStream, createSession, saveMessage, loadMessages } from '@/lib/api'
-import { ArrowDown } from 'lucide-react'
+import { ArrowDown, PanelLeft } from 'lucide-react'
 
 let cachedUser: StoredUser | null = null
 let cachedRaw: string | null | undefined
@@ -59,6 +59,7 @@ export default function ChatPage() {
   const [isNearBottom, setIsNearBottom] = useState(true)
   const scrollRef = useRef<HTMLDivElement>(null)
   const followRef = useRef(true)
+  const scrollRafRef = useRef<number | null>(null)
   const SCROLL_THRESHOLD = 120
 
   const toggleSidebar = useCallback(() => {
@@ -72,12 +73,24 @@ export default function ChatPage() {
   }, [])
 
   const handleScroll = useCallback(() => {
-    const el = scrollRef.current
-    if (!el) return
-    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight
-    const near = distanceFromBottom < SCROLL_THRESHOLD
-    followRef.current = near
-    setIsNearBottom(near)
+    // Throttle with requestAnimationFrame so the near-bottom state is only
+    // re-evaluated once per frame instead of once per scroll event.
+    if (scrollRafRef.current !== null) return
+    scrollRafRef.current = requestAnimationFrame(() => {
+      scrollRafRef.current = null
+      const el = scrollRef.current
+      if (!el) return
+      const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight
+      const near = distanceFromBottom < SCROLL_THRESHOLD
+      followRef.current = near
+      setIsNearBottom((prev) => (prev === near ? prev : near))
+    })
+  }, [])
+
+  useEffect(() => {
+    return () => {
+      if (scrollRafRef.current !== null) cancelAnimationFrame(scrollRafRef.current)
+    }
   }, [])
 
   const scrollToLatest = useCallback(() => {
@@ -133,6 +146,10 @@ export default function ChatPage() {
 
   const handleSend = async (question: string) => {
     if (!user) return
+    // Sending a message always returns the conversation to the bottom and
+    // resumes auto-following, even if the user had scrolled up to read.
+    followRef.current = true
+    setIsNearBottom(true)
     const recentHistory = messages.slice(-3).map((m) => ({ role: m.role, content: m.content }))
     setMessages((prev) => [...prev, { role: 'user', content: question }])
     setIsLoading(true)
@@ -190,7 +207,7 @@ export default function ChatPage() {
   if (!user) return null
 
   return (
-    <div className="h-screen w-full flex overflow-hidden">
+    <div dir="rtl" className="h-screen w-full flex overflow-hidden">
       <Sidebar
         user={user}
         activeSessionId={sessionId}
@@ -209,11 +226,19 @@ export default function ChatPage() {
           showTechnical={showTechnical}
           onToggleTechnical={setShowTechnical}
           onOpenSidebar={() => setIsMobileSidebarOpen(true)}
-          isSidebarCollapsed={isSidebarCollapsed}
-          onToggleSidebar={toggleSidebar}
         />
 
         <div className="relative flex-1 min-h-0 overflow-hidden">
+          {isSidebarCollapsed && (
+            <button
+              onClick={toggleSidebar}
+              className="hidden md:flex absolute top-3 right-3 z-20 w-9 h-9 items-center justify-center rounded-full border border-neutral-700 bg-neutral-900/90 text-neutral-400 hover:text-white hover:border-[#E08A4F]/50 shadow-lg backdrop-blur-sm transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#E08A4F]/60"
+              aria-label="باز کردن نوار کناری"
+              title="باز کردن نوار کناری"
+            >
+              <PanelLeft size={18} />
+            </button>
+          )}
           <div ref={scrollRef} onScroll={handleScroll} className="h-full overflow-y-auto px-4 md:px-8 py-6">
             <div className="max-w-3xl mx-auto">
               {messages.length === 0 && !isLoading && (
@@ -241,7 +266,7 @@ export default function ChatPage() {
           {!isNearBottom && (
             <button
               onClick={scrollToLatest}
-              className="absolute bottom-4 left-1/2 -translate-x-1/2 z-10 flex items-center gap-2 h-9 px-4 rounded-full bg-neutral-900 border border-neutral-700 text-neutral-200 text-xs shadow-lg hover:bg-neutral-800 transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#E08A4F]/60"
+              className="absolute bottom-4 left-1/2 -translate-x-1/2 z-10 flex items-center gap-2 h-9 px-4 rounded-full bg-neutral-900 border border-neutral-700 text-neutral-200 text-xs shadow-lg hover:bg-neutral-800 transition-colors animate-in fade-in slide-in-from-bottom-2 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#E08A4F]/60"
               aria-label="بازگشت به آخرین پیام"
               title="بازگشت به آخرین پیام"
             >

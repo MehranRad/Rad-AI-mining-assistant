@@ -111,34 +111,32 @@ export function Sidebar({
         <p className="text-[11px] text-neutral-500 px-2 mb-2 font-medium">گفتگوها</p>
         {sessions.length === 0 && <p className="text-xs text-neutral-600 px-2">هنوز گفتگویی ثبت نشده</p>}
         {sessions.map((s) => (
-          <button
+          <div
             key={s.session_id}
-            onClick={() => handleSelectMobile(s.session_id)}
-            className={`group w-full flex items-center gap-2 px-2.5 py-2 rounded-lg text-sm text-right transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#E08A4F]/60 ${
+            className={`group w-full flex items-center rounded-lg border text-sm transition-colors ${
               activeSessionId === s.session_id
-                ? 'bg-[#E08A4F]/12 text-white border border-[#E08A4F]/30'
-                : 'text-neutral-400 hover:bg-neutral-900 hover:text-neutral-200 border border-transparent'
+                ? 'bg-[#E08A4F]/12 border-[#E08A4F]/30'
+                : 'border-transparent hover:bg-neutral-900'
             }`}
           >
-            <MessageSquare size={14} className="shrink-0 opacity-60" />
-            <span className="flex-1 truncate">{s.title}</span>
-            <span
-              role="button"
-              tabIndex={0}
+            <button
+              onClick={() => handleSelectMobile(s.session_id)}
+              className={`flex-1 min-w-0 flex items-center gap-2 px-2.5 py-2 text-right rounded-lg focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#E08A4F]/60 ${
+                activeSessionId === s.session_id ? 'text-white' : 'text-neutral-400 group-hover:text-neutral-200'
+              }`}
+            >
+              <MessageSquare size={14} className="shrink-0 opacity-60" />
+              <span className="flex-1 truncate">{s.title}</span>
+            </button>
+            <button
               onClick={(e) => handleDelete(e, s.session_id)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' || e.key === ' ') {
-                  e.preventDefault()
-                  handleDelete(e as unknown as React.MouseEvent, s.session_id)
-                }
-              }}
               aria-label="حذف گفتگو"
               title="حذف گفتگو"
-              className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 max-sm:opacity-100 text-neutral-500 hover:text-red-400 transition-opacity p-1 cursor-pointer"
+              className="shrink-0 mr-0.5 p-1.5 rounded-md text-neutral-500 hover:text-red-400 transition-opacity opacity-0 group-hover:opacity-100 focus-visible:opacity-100 max-sm:opacity-100 cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#E08A4F]/60"
             >
               <Trash2 size={13} />
-            </span>
-          </button>
+            </button>
+          </div>
         ))}
       </div>
 
