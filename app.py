@@ -1,5 +1,6 @@
 import streamlit as st
 from agent import ask_question, db
+from schema_constants import STATUS_RUNNING
 from chat_storage import (
     init_chat_tables, create_session, save_message,
     list_sessions, load_messages, delete_session,
@@ -8,6 +9,8 @@ from chat_storage import (
 import ast
 import os
 import html
+
+MODEL_NAME = os.getenv("MODEL_NAME", "qwen3:4b-instruct-2507-q4_K_M")
 
 
 st.set_page_config(
@@ -461,7 +464,7 @@ st.markdown(f"""
     <div>
         <p class="hero-title">دستیار هوشمند تحلیل داده معدن مس</p>
         <p class="hero-sub">پرسش و پاسخ هوشمند درباره تولید، تجهیزات و نیروی انسانی</p>
-        <p class="hero-caption">اجرای محلی · Llama 3.1 · بدون اتصال به اینترنت</p>
+        <p class="hero-caption">اجرای محلی · {MODEL_NAME} · بدون اتصال به اینترنت</p>
     </div>
 </div>
 """, unsafe_allow_html=True)
@@ -482,7 +485,7 @@ def get_snapshot_stats():
     return {
         "employees": _first_value(db.run("SELECT COUNT(*) FROM Employees")),
         "equipment": _first_value(db.run("SELECT COUNT(*) FROM Equipment")),
-        "running": _first_value(db.run("SELECT COUNT(*) FROM Equipment WHERE Status='Running'")),
+        "running": _first_value(db.run(f"SELECT COUNT(*) FROM Equipment WHERE Status='{STATUS_RUNNING}'")),
         "recovery": _first_value(db.run("SELECT AVG(RecoveryRate) FROM Production")),
     }
 
@@ -718,6 +721,6 @@ if question:
         save_message(st.session_state.session_id, "assistant", answer, steps)
 
 st.markdown(
-    "<div class='footer-credit'>اجرا شده به‌صورت محلی با Llama 3.1 · بدون اتصال به اینترنت · Prototype</div>",
+    "<div class='footer-credit'>اجرا شده به‌صورت محلی با " + MODEL_NAME + " · بدون اتصال به اینترنت · Prototype</div>",
     unsafe_allow_html=True
 )

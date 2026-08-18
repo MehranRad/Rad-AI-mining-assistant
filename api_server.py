@@ -9,22 +9,25 @@ login. This closes a real vulnerability where a client could edit
 localStorage to claim any role (e.g. "manager") and bypass RBAC.
 """
 import os
+import time
+import json
 import jwt
 import datetime
-from fastapi import FastAPI, HTTPException, Depends
+from collections import defaultdict
+from fastapi import FastAPI, HTTPException, Depends, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 from typing import Optional, List
-import json
 from dotenv import load_dotenv
 
 from agent import ask_question, ask_question_stream, db
+from schema_constants import STATUS_RUNNING
 from chat_storage import (
     init_chat_tables, create_session, save_message,
-    list_sessions, load_messages, delete_session,
-    init_user_table, authenticate_user
+    list_sessions, load_messages, delete_session, is_session_owner,
+    init_user_table, authenticate_user, list_audit_log
 )
 
 load_dotenv()
@@ -34,11 +37,37 @@ if not JWT_SECRET:
 JWT_ALGORITHM = "HS256"
 TOKEN_EXPIRY_HOURS = 8
 
+# ----- Simple in-memory login throttling -----
+# Purpose: slow down brute-force password guessing without ever locking a
+# legitimate user out permanently. After LOGIN_MAX_ATTEMPTS failed attempts
+# for one username within LOGIN_WINDOW_SECONDS, further attempts are rejected
+# with HTTP 429 for LOGIN_LOCKOUT_SECONDS. A successful login resets the count.
+LOGIN_ATTEMPTS = defaultdict(list)  # username -> list of failure timestamps
+LOGIN_MAX_ATTEMPTS = 5
+LOGIN_WINDOW_SECONDS = 300
+LOGIN_LOCKOUT_SECONDS = 60
+
+
+def _login_throttle_wait(username: str) -> float:
+    """Seconds the caller must wait before retrying, or 0.0 if allowed now."""
+    now = time.time()
+    recent = [t for t in LOGIN_ATTEMPTS.get(username, []) if now - t < LOGIN_WINDOW_SECONDS]
+    LOGIN_ATTEMPTS[username] = recent
+    if len(recent) >= LOGIN_MAX_ATTEMPTS:
+        return LOGIN_LOCKOUT_SECONDS
+    return 0.0
+
 app = FastAPI(title="Rad AI API")
+
+CORS_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",")
+    if origin.strip()
+]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -110,10 +139,18 @@ class SaveMessageRequest(BaseModel):
 
 # ---------- Auth ----------
 @app.post("/api/login")
-def login(payload: LoginRequest):
-    result = authenticate_user(payload.username.strip(), payload.password)
+def login(payload: LoginRequest, response: Response):
+    username = payload.username.strip()
+    wait = _login_throttle_wait(username)
+    if wait > 0:
+        response.status_code = 429
+        response.headers["Retry-After"] = str(int(wait))
+        return {"detail": "تلاش‌های ناموفق زیاد است. لطفاً کمی بعد دوباره تلاش کنید."}
+    result = authenticate_user(username, payload.password)
     if result is None:
+        LOGIN_ATTEMPTS[username].append(time.time())
         raise HTTPException(status_code=401, detail="نام کاربری یا رمز عبور اشتباه است.")
+    LOGIN_ATTEMPTS.pop(username, None)
     token = create_access_token(result["user_id"], result["username"], result["role"])
     return {"token": token, "user": result}
 
@@ -162,6 +199,8 @@ def new_session(payload: CreateSessionRequest, current_user: dict = Depends(get_
 
 @app.post("/api/sessions/message")
 def add_message(payload: SaveMessageRequest, current_user: dict = Depends(get_current_user)):
+    if not is_session_owner(payload.session_id, current_user["user_id"]):
+        raise HTTPException(status_code=403, detail="دسترسی غیرمجاز.")
     save_message(payload.session_id, payload.role, payload.content, payload.steps)
     return {"status": "ok"}
 
@@ -184,6 +223,15 @@ def get_stats(current_user: dict = Depends(get_current_user)):
     return {
         "employees": _first_value(db.run("SELECT COUNT(*) FROM Employees")),
         "equipment": _first_value(db.run("SELECT COUNT(*) FROM Equipment")),
-        "running": _first_value(db.run("SELECT COUNT(*) FROM Equipment WHERE Status='Running'")),
+        "running": _first_value(db.run(f"SELECT COUNT(*) FROM Equipment WHERE Status='{STATUS_RUNNING}'")),
         "recovery": _first_value(db.run("SELECT AVG(RecoveryRate) FROM Production")),
     }
+
+
+# ---------- Audit (manager-only) ----------
+@app.get("/api/audit")
+def audit_log(current_user: dict = Depends(get_current_user)):
+    if current_user["role"] != "manager":
+        raise HTTPException(status_code=403, detail="فقط مدیران می‌توانند گزارش امنیت را مشاهده کنند.")
+    limit = 100
+    return list_audit_log(limit=limit)

@@ -1,4 +1,4 @@
-const API_BASE = "http://localhost:8000"
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8000"
 
 function getToken(): string | null {
   return localStorage.getItem("rad_ai_token")
@@ -7,6 +7,22 @@ function getToken(): string | null {
 function authHeaders(): Record<string, string> {
   const token = getToken()
   return token ? { Authorization: `Bearer ${token}` } : {}
+}
+
+function handleUnauthorized(res: Response) {
+  if (res.status === 401) {
+    localStorage.removeItem("rad_ai_token")
+    localStorage.removeItem("rad_ai_user")
+    if (typeof window !== "undefined" && window.location.pathname !== "/") {
+      window.location.href = window.location.origin + "/"
+    }
+  }
+}
+
+async function throwIfUnauthorized(res: Response, fallbackMessage: string) {
+  if (res.status === 401) handleUnauthorized(res)
+  const err = await res.json().catch(() => ({ detail: fallbackMessage }))
+  throw new Error(err.detail || fallbackMessage)
 }
 
 export type LoginResult = {
@@ -46,8 +62,7 @@ export async function askQuestion(
     body: JSON.stringify({ question, history: history || [] }),
   })
   if (!res.ok) {
-    const err = await res.json().catch(() => ({ detail: "خطای غیرمنتظره" }))
-    throw new Error(err.detail || "خطای غیرمنتظره رخ داد.")
+    await throwIfUnauthorized(res, "خطای غیرمنتظره رخ داد.")
   }
   return res.json()
 }
@@ -70,8 +85,8 @@ export async function askQuestionStream(
       headers: { "Content-Type": "application/json", ...authHeaders() },
       body: JSON.stringify({ question, history: history || [] }),
     })
+    if (res.status === 401) handleUnauthorized(res)
     if (!res.ok || !res.body) {
-      if (res.status === 401) throw new Error("نشست شما منقضی شده است. دوباره وارد شوید.")
       throw new Error("خطای غیرمنتظره رخ داد.")
     }
 
@@ -108,7 +123,7 @@ export async function askQuestionStream(
 
 export async function listSessions(userId: number) {
   const res = await fetch(`${API_BASE}/api/sessions/${userId}`, { headers: authHeaders() })
-  if (!res.ok) throw new Error("خطا در دریافت گفتگوها")
+  if (!res.ok) await throwIfUnauthorized(res, "خطا در دریافت گفتگوها")
   return res.json()
 }
 
@@ -116,7 +131,7 @@ export async function loadMessages(userId: number, sessionId: string) {
   const res = await fetch(`${API_BASE}/api/sessions/${userId}/${sessionId}/messages`, {
     headers: authHeaders(),
   })
-  if (!res.ok) throw new Error("خطا در دریافت پیام‌ها")
+  if (!res.ok) await throwIfUnauthorized(res, "خطا در دریافت پیام‌ها")
   return res.json()
 }
 
@@ -126,7 +141,7 @@ export async function createSession(title: string): Promise<{ session_id: string
     headers: { "Content-Type": "application/json", ...authHeaders() },
     body: JSON.stringify({ title }),
   })
-  if (!res.ok) throw new Error("خطا در ایجاد گفتگو")
+  if (!res.ok) await throwIfUnauthorized(res, "خطا در ایجاد گفتگو")
   return res.json()
 }
 
@@ -141,7 +156,7 @@ export async function saveMessage(
     headers: { "Content-Type": "application/json", ...authHeaders() },
     body: JSON.stringify({ session_id: sessionId, role, content, steps }),
   })
-  if (!res.ok) throw new Error("خطا در ذخیره پیام")
+  if (!res.ok) await throwIfUnauthorized(res, "خطا در ذخیره پیام")
   return res.json()
 }
 
@@ -150,7 +165,7 @@ export async function deleteSession(userId: number, sessionId: string) {
     method: "DELETE",
     headers: authHeaders(),
   })
-  if (!res.ok) throw new Error("خطا در حذف گفتگو")
+  if (!res.ok) await throwIfUnauthorized(res, "خطا در حذف گفتگو")
   return res.json()
 }
 
@@ -163,6 +178,6 @@ export type Stats = {
 
 export async function getStats(): Promise<Stats> {
   const res = await fetch(`${API_BASE}/api/stats`, { headers: authHeaders() })
-  if (!res.ok) throw new Error("خطا در دریافت آمار")
+  if (!res.ok) await throwIfUnauthorized(res, "خطا در دریافت آمار")
   return res.json()
 }

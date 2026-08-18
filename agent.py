@@ -7,6 +7,21 @@ import re
 import ast
 import difflib
 from chat_storage import log_audit_event, CONFIDENTIAL_CATEGORIES
+from schema_constants import (
+    fmt_values,
+    MINES,
+    GENDERS,
+    GENDER_GLOSS,
+    EMPLOYEE_SHIFTS,
+    SHIFT_GLOSS,
+    PRODUCTION_SHIFTS,
+    DEPARTMENTS,
+    JOB_TITLES,
+    EQUIPMENT_CATEGORIES,
+    EQUIPMENT_MANUFACTURERS,
+    EQUIPMENT_STATUSES,
+    STATUS_GLOSS,
+)
 
 load_dotenv()
 
@@ -40,32 +55,24 @@ llm = ChatOllama(
 )
 llm_final = llm  # kept as an alias so no other code needs to change
 
-TABLE_CONTEXT = """
+TABLE_CONTEXT = f"""
 Table Employees (~6000 records):
 - EmployeeID (Primary Key), FirstName, LastName, Gender, Age,
   Department, JobTitle, Mine, HireDate, Salary, OvertimeHours, OvertimePay, Shift
 - ALL text values below are stored in PERSIAN (Farsi) exactly as written here.
   Do NOT translate them to English — use them verbatim in SQL.
-- Gender exact values: 'مرد' (male), 'زن' (female)
-- Mine exact values: 'سونگون', 'سرچشمه', 'خاتون‌آباد', 'میدوک'
+- Gender exact values: {fmt_values(GENDERS, GENDER_GLOSS)}
+- Mine exact values: {fmt_values(MINES)}
   NOTE: 'خاتون‌آباد' contains a Persian half-space (ZWNJ) character between
   خاتون and آباد that is easy to mistype or drop. To avoid exact-match
   failures from this, ALWAYS filter Mine with LIKE and a wildcard instead
   of '=', e.g. WHERE Mine LIKE '%خاتون%' instead of WHERE Mine = 'خاتون‌آباد'.
   This applies to all four mine names, e.g. WHERE Mine LIKE '%سونگون%'.
-- Department exact values: 'نگهداری و تعمیرات', 'ایمنی', 'فناوری اطلاعات',
-  'تولید', 'برق', 'مکانیک', 'مالی', 'منابع انسانی', 'انبار'
-- JobTitle exact values: 'مهندس نگهداری و تعمیرات', 'بازرس ایمنی',
-  'تکنسین تعمیرات', 'کارشناس شبکه', 'اپراتور تولید', 'برق‌کار',
-  'تعمیرکار مکانیکی', 'ماشین‌کار', 'حسابدار', 'کارشناس منابع انسانی',
-  'مهندس برق', 'کارگر تولید', 'کارشناس سیستم‌ها', 'کارشناس مالی',
-  'افسر ایمنی', 'سرپرست تعمیرات', 'کارمند انبار', 'سرپرست شیفت',
-  'مهندس مکانیک', 'مهندس تولید', 'مدیر نگهداری و تعمیرات',
-  'مدیر فناوری اطلاعات', 'سرپرست انبار', 'مدیر منابع انسانی',
-  'مدیر مالی', 'مدیر کارخانه', 'مدیر HSE'
+- Department exact values: {fmt_values(DEPARTMENTS)}
+- JobTitle exact values: {fmt_values(JOB_TITLES)}
   NOTE: some job titles contain a ZWNJ half-space (برق‌کار, ماشین‌کار).
   Prefer LIKE with a wildcard for JobTitle too, e.g. WHERE JobTitle LIKE '%برق%کار%'.
-- Shift exact values: 'شب' (night), 'صبح' (morning), 'عصر' (evening), 'Unknown'
+- Shift exact values: {fmt_values(EMPLOYEE_SHIFTS, SHIFT_GLOSS)}
 - Salary, OvertimeHours, OvertimePay are individual financial/personal fields —
   same sensitivity level as Salary. Treat them identically under all privacy rules.
 - IMPORTANT: OvertimeHours and OvertimePay belong ONLY to the Employees table.
@@ -96,13 +103,9 @@ Table Equipment (~800 records):
 - Category and Manufacturer are in ENGLISH (equipment type/brand names).
   Mine and Status are in PERSIAN. Do not translate either direction — use
   each value in its actual language, verbatim.
-- Category exact values: 'Pump', 'Conveyor', 'Truck', 'Generator', 'Ball Mill',
-  'Bulldozer', 'Screen', 'Excavator', 'Crusher', 'Loader', 'Drill', 'Flotation Cell'
-- Manufacturer exact values: 'Atlas Copco', 'Hitachi', 'XCMG', 'Caterpillar',
-  'SANY', 'Liebherr', 'ThyssenKrupp', 'Metso', 'Volvo', 'FLSmidth', 'Komatsu',
-  'Epiroc', 'Sandvik' (may be NULL for some rows)
-- Status exact values: 'در حال کار' (Running), 'در تعمیر' (Maintenance),
-  'متوقف' (Stopped) (may be NULL for some rows)
+- Category exact values: {fmt_values(EQUIPMENT_CATEGORIES)}
+- Manufacturer exact values: {fmt_values(EQUIPMENT_MANUFACTURERS)}
+- Status exact values: {fmt_values(EQUIPMENT_STATUSES, STATUS_GLOSS)}
 - Mine exact values: same as Employees.Mine above — use LIKE with a wildcard,
   never exact '=', for the same ZWNJ reason.
 - This table already contains Mine and Status directly as columns.
@@ -114,7 +117,7 @@ Table Production (~45000 records):
   CopperOreTon, CopperConcentrateTon, RecoveryRate, WorkingHours,
   DowntimeHours, EnergyConsumption, FuelConsumption
 - Mine exact values: same as above (Persian, use LIKE not '=').
-- Shift exact values: 'شب', 'صبح', 'عصر'
+- Shift exact values: {fmt_values(PRODUCTION_SHIFTS)}
 - RecoveryRate is a percentage (0-100). DowntimeHours is hours, NOT a percentage.
 
 IMPORTANT SECURITY RULES FOR SQL GENERATION:
@@ -164,13 +167,13 @@ FROM Equipment
 GROUP BY Mine, Status
 """
 
-FIXED_WORKFORCE_QUERY = """
+FIXED_WORKFORCE_QUERY = f"""
 SELECT Mine,
        COUNT(EmployeeID) AS EmployeeCount,
        AVG(Salary) AS AvgSalary,
        AVG(Age) AS AvgAge,
-       SUM(CASE WHEN Gender = 'مرد' THEN 1 ELSE 0 END) AS MaleCount,
-       SUM(CASE WHEN Gender = 'زن' THEN 1 ELSE 0 END) AS FemaleCount
+       SUM(CASE WHEN Gender = '{GENDERS[0]}' THEN 1 ELSE 0 END) AS MaleCount,
+       SUM(CASE WHEN Gender = '{GENDERS[1]}' THEN 1 ELSE 0 END) AS FemaleCount
 FROM Employees
 GROUP BY Mine
 """
@@ -378,11 +381,13 @@ def check_sql_for_privacy_risk(sql: str, role: str = "supervisor") -> bool:
     """
     Stage C: inspects the GENERATED SQL. Catches cases where the question's
     intent slipped past stages A/B but the model still produced a query that
-    isolates one individual's record — either by filtering on an identifier,
-    or by sorting+limiting to a single row (which also singles out one person
-    even without an explicit WHERE clause).
+    isolates one individual's record — either by filtering on an identifier
+    (via `=`, `LIKE`, `IN`, `RLIKE`/`REGEXP`), or by sorting+limiting to a
+    handful of rows (which also singles out individuals even without an
+    explicit WHERE clause). Aggregate queries (GROUP BY) that sort+limit per
+    group (e.g. "which mine has the highest average salary") are NOT flagged.
     The 'manager' role is authorized for individual lookups (see role access
-    matrix), so those two checks are skipped for it — but SELECT * remains
+    matrix), so the individual checks are skipped for it — but SELECT * remains
     blocked for EVERY role, including manager (data minimization: even an
     authorized lookup should only request the columns actually needed).
     """
@@ -399,19 +404,35 @@ def check_sql_for_privacy_risk(sql: str, role: str = "supervisor") -> bool:
         return False
 
     identifier_cols = ["firstname", "lastname", "employeeid", "operatorid"]
+
+    # 1) exact-match filter on an identifier column
     filters_individual = any(
         re.search(rf"\bwhere\b.*\b{col}\b\s*=", sql_lower) for col in identifier_cols
     )
 
+    # 2) fuzzy/collection filter on an identifier column (LIKE / IN / RLIKE / REGEXP)
+    fuzzy_individual_filter = any(
+        re.search(rf"\bwhere\b.*\b{col}\b\s*(?:not\s+)?(like|in|rlike|regexp)\s*\(?\s*['\"]", sql_lower)
+        for col in identifier_cols
+    )
+
+    # 3) ORDER BY a sensitive/identifier column + small LIMIT, WITHOUT a GROUP BY
+    #    (a GROUP BY means the result rows are groups, not individuals, so a
+    #    mine-level "ORDER BY SUM(...) LIMIT 1" comparison stays allowed).
     singles_out_via_limit = bool(
-        re.search(r"order\s+by\s+.*(salary|age|hiredate).*limit\s+[123]\b", sql_lower)
+        "group by" not in sql_lower
+        and re.search(
+            r"\border\s+by\b.*?\b(salary|overtimepay|overtimehours|age|hiredate|firstname|lastname)\b"
+            r".*?\blimit\s+(?:[1-5])\b",
+            sql_lower,
+        )
     )
 
     sensitive_cols = ["salary", "overtimepay", "overtimehours", "hiredate", "age",
                        "gender", "jobtitle", "firstname", "lastname"]
     selects_sensitive = any(col in sql_lower.split("from")[0] for col in sensitive_cols)
 
-    if filters_individual and selects_sensitive:
+    if (filters_individual or fuzzy_individual_filter) and selects_sensitive:
         return True
     if singles_out_via_limit:
         return True
@@ -894,9 +915,11 @@ def detect_question_topics(question: str) -> set:
     return topics
 
 
-def generate_final_answer(question: str, context_blocks: list) -> str:
+def _build_final_answer_prompt(question: str, context_blocks: list) -> str:
+    """Single source of truth for the final-answer prompt shared by the
+    streaming and non-streaming paths."""
     joined_context = "\n\n".join(context_blocks)
-    prompt = f"""You are a professional data analyst for a copper mining company in Iran.
+    return f"""You are a professional data analyst for a copper mining company in Iran.
 
 The user asked (in Persian): {question}
 
@@ -906,7 +929,6 @@ Here is the data you retrieved:
 Write your ENTIRE answer in Persian (Farsi), in clear professional business language.
 Keep mine names, numbers, and technical terms as they are.
 
-CRITICAL RULES:
 CRITICAL RULES:
 - If the data contains a salary, wage, or payment figure (Salary, OvertimePay),
   always state the currency as "تومان" — never write "ریال" or omit the currency.
@@ -934,6 +956,10 @@ CRITICAL RULES:
 - If a query failed or is marked unavailable, say so clearly in Persian instead of guessing.
 - Be concise. Do not add unnecessary sections.
 - Write the final answer ONLY in Persian."""
+
+
+def generate_final_answer(question: str, context_blocks: list) -> str:
+    prompt = _build_final_answer_prompt(question, context_blocks)
     try:
         response = llm_final.invoke(prompt)
         return response.content.strip()
@@ -950,45 +976,7 @@ def generate_final_answer_stream(question: str, context_blocks: list):
     rules, but yields text chunks as the model generates them instead of
     waiting for the full response. Used only by ask_question_stream().
     """
-    joined_context = "\n\n".join(context_blocks)
-    prompt = f"""You are a professional data analyst for a copper mining company in Iran.
-
-The user asked (in Persian): {question}
-
-Here is the data you retrieved:
-{joined_context}
-
-Write your ENTIRE answer in Persian (Farsi), in clear professional business language.
-Keep mine names, numbers, and technical terms as they are.
-
-CRITICAL RULES:
-CRITICAL RULES:
-- If the data contains a salary, wage, or payment figure (Salary, OvertimePay),
-  always state the currency as "تومان" — never write "ریال" or omit the currency.
-- ONLY talk about topics that are present in the data above.
-- NEVER invent, estimate, or guess a number that is not explicitly present in the data above.
-- NEVER invent a field/metric name that is not literally present in the data above
-  (e.g. do not say "OvertimePay" or "تولید" if no such value was given to you —
-  only refer to fields that are explicitly labeled in the data blocks).
-- COPY every number EXACTLY as given — same digits, same magnitude. Never add,
-  drop, or shift digits (e.g. do not turn 25,139,553,834 into 251,395,538,340).
-- If a line starting with "IMPORTANT — verified facts" is present in the data,
-  treat every number/entity in it as ALREADY CORRECT and FINAL — quote it
-  directly, never recompute it yourself or produce a different number for the
-  same comparison.
-- When describing a difference in percentage points, say "واحد درصد" or
-  "امتیاز درصد" — never translate "points" as "پیوند".
-- NEVER assume the mine/entity named in the user's question is automatically the
-  "highest" or "lowest" on any metric — always verify this against the actual
-  ranking given in the data before making such a claim.
-- If a difference is explicitly labeled "NOT meaningful" in the data above, say so
-  plainly (e.g. "تفاوت معناداری بین معادن مشاهده نمی‌شود") rather than treating a
-  small numeric difference as if it were a significant problem requiring action.
-- If differences/percentages are already labeled above, use those exact numbers and translate
-  the labels into Persian yourself. Do NOT recalculate or re-judge significance.
-- If a query failed or is marked unavailable, say so clearly in Persian instead of guessing.
-- Be concise. Do not add unnecessary sections.
-- Write the final answer ONLY in Persian."""
+    prompt = _build_final_answer_prompt(question, context_blocks)
     try:
         for chunk in llm_final.stream(prompt):
             content = getattr(chunk, "content", "")

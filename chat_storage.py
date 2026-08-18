@@ -150,6 +150,20 @@ def delete_session(session_id: str, user_id: int):
         conn.execute(text("DELETE FROM ChatSessions WHERE SessionID=:sid"), {"sid": session_id})
 
 
+def is_session_owner(session_id: str, user_id: int) -> bool:
+    """
+    Returns True only if the given session exists AND belongs to user_id.
+    Used to authorize message writes to a session (IDOR guard, matching the
+    checks already done in load_messages/delete_session).
+    """
+    with storage_engine.connect() as conn:
+        row = conn.execute(
+            text("SELECT UserID FROM ChatSessions WHERE SessionID = :sid"),
+            {"sid": session_id}
+        ).fetchone()
+    return row is not None and row[0] == user_id
+
+
 # ============================================================
 # USER AUTHENTICATION / RBAC TABLE
 # New in this step. Purely additive — nothing above this line changed.
