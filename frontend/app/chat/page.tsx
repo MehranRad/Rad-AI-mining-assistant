@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useRef, useState, useCallback } from 'react'
+import { useEffect, useRef, useState, useCallback, useSyncExternalStore } from 'react'
 import { useRouter } from 'next/navigation'
 import { Sidebar } from '@/components/chat/sidebar'
 import { ChatHeader } from '@/components/chat/chat-header'
@@ -12,9 +12,38 @@ import { ThinkingIndicator } from '@/components/chat/thinking-indicator'
 import { StoredUser, ChatMessage, StepDetail } from '@/lib/types'
 import { askQuestionStream, createSession, saveMessage, loadMessages } from '@/lib/api'
 
+let cachedUser: StoredUser | null = null
+let cachedRaw: string | null | undefined
+
+function subscribeUser() {
+  return () => {}
+}
+
+function getUserSnapshot(): StoredUser | null {
+  if (typeof window === 'undefined') return null
+  const raw = localStorage.getItem('rad_ai_user')
+  if (raw !== cachedRaw) {
+    cachedRaw = raw
+    if (raw === null) {
+      cachedUser = null
+    } else {
+      try {
+        cachedUser = JSON.parse(raw)
+      } catch {
+        cachedUser = null
+      }
+    }
+  }
+  return cachedUser
+}
+
+function getServerSnapshot(): StoredUser | null {
+  return null
+}
+
 export default function ChatPage() {
   const router = useRouter()
-  const [user, setUser] = useState<StoredUser | null>(null)
+  const user = useSyncExternalStore(subscribeUser, getUserSnapshot, getServerSnapshot)
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [sessionId, setSessionId] = useState<string | null>(null)
   const [isLoading, setIsLoading] = useState(false)
@@ -25,12 +54,9 @@ export default function ChatPage() {
   const scrollRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
-    const raw = localStorage.getItem('rad_ai_user')
-    if (!raw) {
+    if (!localStorage.getItem('rad_ai_user')) {
       router.push('/')
-      return
     }
-    setUser(JSON.parse(raw))
   }, [router])
 
   useEffect(() => {
