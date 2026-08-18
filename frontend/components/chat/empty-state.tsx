@@ -9,12 +9,12 @@ const EXAMPLE_QUESTIONS = [
   'کدام معدن بیشترین ریسک را دارد؟',
 ]
 
+import Image from 'next/image'
+
 export function EmptyState({ onPick }: { onPick: (q: string) => void }) {
   return (
     <div className="flex flex-col items-center text-center py-10 px-4" dir="rtl">
-      <div className="relative w-16 h-16 mb-6 rounded-full bg-gradient-to-br from-[#E08A4F] to-[#8B4A28] flex items-center justify-center shadow-[0_0_40px_-8px_rgba(224,138,79,0.7)]">
-        <span className="font-en text-white text-xl font-bold">R</span>
-      </div>
+      <Image src="/logo.png" alt="Rad AI" width={72} height={72} className="w-16 h-16 mb-6 object-contain drop-shadow-[0_0_25px_rgba(224,138,79,0.4)]" />
       <h2 className="text-xl font-semibold text-white mb-2 font-en">Rad AI, at your fingertips.</h2>
       <p className="text-sm text-neutral-400 max-w-md mb-8">
         سوالات خود را درباره تولید، تجهیزات، نیروی انسانی و عملکرد عملیاتی معدن بپرسید.

@@ -1,5 +1,6 @@
 'use client'
 
+import Image from 'next/image'
 import { Menu } from 'lucide-react'
 
 type ChatHeaderProps = {
@@ -23,8 +24,8 @@ export function ChatHeader({ showTechnical, onToggleTechnical, onOpenSidebar }: 
           <Menu size={20} />
         </button>
 
-        <div className="relative w-8 h-8 rounded-full bg-gradient-to-br from-[#E08A4F] to-[#8B4A28] flex items-center justify-center shadow-[0_0_15px_-3px_rgba(224,138,79,0.6)]">
-          <span className="font-en text-white text-[10px] font-bold">R</span>
+                <div className="relative w-8 h-8 shrink-0">
+          <Image src="/logo.png" alt="Rad AI" width={32} height={32} className="w-8 h-8 object-contain" />
           <span className="absolute -bottom-0.5 -left-0.5 w-2.5 h-2.5 rounded-full bg-emerald-400 border-2 border-neutral-950" />
         </div>
         <div>

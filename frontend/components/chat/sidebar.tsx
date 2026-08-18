@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
+import Image from 'next/image'
 import { Plus, Trash2, LogOut, MessageSquare } from 'lucide-react'
 import { listSessions, deleteSession } from '@/lib/api'
 import { StoredUser, SessionSummary } from '@/lib/types'
@@ -77,10 +78,8 @@ export function Sidebar({
         dir="rtl"
       >
       <div className="shrink-0 p-4 space-y-4">
-        <div className="flex items-center gap-2.5 px-1">
-          <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-[#E08A4F] to-[#8B4A28] flex items-center justify-center shadow-[0_0_15px_-3px_rgba(224,138,79,0.6)]">
-            <span className="font-en text-white font-bold text-xs">Rad</span>
-          </div>
+                <div className="flex items-center gap-2.5 px-1">
+          <Image src="/logo.png" alt="Rad AI" width={36} height={36} className="w-9 h-9 object-contain shrink-0" />
           <span className="font-en text-white font-semibold text-sm">Rad AI</span>
         </div>
 

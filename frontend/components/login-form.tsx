@@ -2,6 +2,7 @@
 
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
+import Image from 'next/image'
 import { Eye, EyeOff, Loader2, AlertCircle } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -41,17 +42,18 @@ export function LoginForm() {
 
   return (
     <div className="w-full max-w-sm mx-auto">
-      <div className="flex items-center gap-3 mb-10">
-        <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-[#E08A4F] to-[#8B4A28] flex items-center justify-center shadow-[0_0_20px_-4px_rgba(224,138,79,0.6)]">
-          <span className="font-en text-white font-bold text-sm">Rad</span>
-        </div>
-        <div>
-          <p className="font-en text-white font-semibold leading-none">Rad AI</p>
-          <p className="font-en text-neutral-500 text-xs mt-1">Mining Intelligence Assistant</p>
-        </div>
+            <div className="flex justify-center mb-8">
+        <Image
+          src="/logo.png"
+          alt="Rad AI"
+          width={140}
+          height={140}
+          priority
+          className="w-28 h-28 md:w-32 md:h-32 object-contain drop-shadow-[0_0_30px_rgba(224,138,79,0.35)]"
+        />
       </div>
 
-      <h1 className="text-2xl font-semibold text-white mb-2">خوش آمدید</h1>
+      <h1 className="text-2xl font-semibold text-white mb-2 text-center">خوش آمدید</h1>
       <p className="text-neutral-400 text-sm mb-8">
         برای ورود به دستیار هوشمند معدن مس، اطلاعات کاربری خود را وارد کنید.
       </p>

@@ -30,25 +30,15 @@ db = SQLDatabase.from_uri(
     engine_args={"pool_pre_ping": True, "pool_recycle": 280}
 )
 
+# Single unified model for everything (SQL generation, classification,
+# and final-answer synthesis) — override with the MODEL_NAME env var to
+# test alternatives without editing this file again.
 llm = ChatOllama(
-    model="qwen3:4b-instruct-2507-q4_K_M",
+    model=os.getenv("MODEL_NAME", "qwen3:4b-instruct-2507-q4_K_M"),
     temperature=0,
     base_url="http://127.0.0.1:11434"
 )
-
-# The final-answer synthesis step (combining several precomputed Persian
-# data blocks into one coherent answer) needs more reliability than SQL
-# generation/classification — a small 4B model was observed to invent
-# field names, shift digits (25,139,553,834 -> 251,395,538,340), and
-# corrupt Persian words during this step. A separate, larger model is
-# used ONLY for this final synthesis; SQL generation/classification keep
-# using the fast small model above, since they don't need this precision.
-# Override with the FINAL_ANSWER_MODEL env var if you want to test others.
-llm_final = ChatOllama(
-    model=os.getenv("FINAL_ANSWER_MODEL", "qwen2.5-coder:14b"),
-    temperature=0,
-    base_url="http://127.0.0.1:11434"
-)
+llm_final = llm  # kept as an alias so no other code needs to change
 
 TABLE_CONTEXT = """
 Table Employees (~6000 records):
