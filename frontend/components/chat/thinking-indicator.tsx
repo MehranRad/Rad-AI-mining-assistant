@@ -6,7 +6,7 @@ export function ThinkingIndicator() {
       <div className="w-8 h-8 rounded-full bg-gradient-to-br from-[#E08A4F] to-[#8B4A28] flex items-center justify-center shrink-0 shadow-[0_0_15px_-2px_rgba(224,138,79,0.6)]">
         <span className="font-en text-white text-[10px] font-bold">R</span>
       </div>
-      <ShiningText text="در حال فکر کردن..." />
+      <ShiningText text="Rad AI is thinking ..." />
     </div>
   )
 }
