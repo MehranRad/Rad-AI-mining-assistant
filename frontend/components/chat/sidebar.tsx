@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import Image from 'next/image'
-import { Plus, Trash2, LogOut, MessageSquare } from 'lucide-react'
+import { Plus, Trash2, LogOut, MessageSquare, PanelLeftClose } from 'lucide-react'
 import { listSessions, deleteSession } from '@/lib/api'
 import { StoredUser, SessionSummary } from '@/lib/types'
 
@@ -22,6 +22,7 @@ type SidebarProps = {
   isMobileOpen: boolean
   onMobileClose: () => void
   collapsed?: boolean
+  onToggleSidebar?: () => void
 }
 
 export function Sidebar({
@@ -34,6 +35,7 @@ export function Sidebar({
   isMobileOpen,
   onMobileClose,
   collapsed = false,
+  onToggleSidebar,
 }: SidebarProps) {
   const [sessions, setSessions] = useState<SessionSummary[]>([])
 
@@ -73,9 +75,9 @@ export function Sidebar({
           fixed md:static top-0 bottom-0 right-0 z-50
           h-screen md:h-full
           w-72 shrink-0 flex flex-col border-l border-neutral-800/80 bg-neutral-950 md:bg-neutral-950/60 backdrop-blur-sm
-          transition-[transform,width] duration-300 ease-in-out
+          transition-[transform,width,opacity] duration-300 ease-in-out
           ${isMobileOpen ? 'translate-x-0' : 'translate-x-full md:translate-x-0'}
-          ${collapsed ? 'md:w-0 md:overflow-hidden md:border-l-0 md:invisible' : 'md:w-72'}
+          ${collapsed ? 'md:w-0 md:overflow-hidden md:border-l-0 md:opacity-0 md:pointer-events-none' : 'md:w-72'}
           md:flex
         `}
         dir="rtl"
@@ -84,11 +86,21 @@ export function Sidebar({
                 <div className="flex items-center gap-2.5 px-1">
           <Image src="/logo.png" alt="Rad AI" width={36} height={36} className="w-9 h-9 object-contain shrink-0" />
           <span className="font-en text-white font-semibold text-sm">Rad AI</span>
+          {onToggleSidebar && (
+            <button
+              onClick={onToggleSidebar}
+              className="hidden md:flex ms-auto w-8 h-8 items-center justify-center rounded-lg text-neutral-500 hover:text-white hover:bg-neutral-900 transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#E08A4F]/60"
+              aria-label="بستن نوار کناری"
+              title="بستن نوار کناری"
+            >
+              <PanelLeftClose size={17} />
+            </button>
+          )}
         </div>
 
         <button
           onClick={handleNewConversationMobile}
-          className="w-full flex items-center justify-center gap-2 h-10 rounded-lg bg-[#B5723A] hover:bg-[#8B4A28] text-white text-sm font-medium transition-colors"
+          className="w-full flex items-center justify-center gap-2 h-10 rounded-lg bg-[#B5723A] hover:bg-[#8B4A28] text-white text-sm font-medium transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#E08A4F]/60"
         >
           <Plus size={16} />
           گفتگوی جدید
@@ -102,7 +114,7 @@ export function Sidebar({
           <button
             key={s.session_id}
             onClick={() => handleSelectMobile(s.session_id)}
-            className={`group w-full flex items-center gap-2 px-2.5 py-2 rounded-lg text-sm text-right transition-colors ${
+            className={`group w-full flex items-center gap-2 px-2.5 py-2 rounded-lg text-sm text-right transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#E08A4F]/60 ${
               activeSessionId === s.session_id
                 ? 'bg-[#E08A4F]/12 text-white border border-[#E08A4F]/30'
                 : 'text-neutral-400 hover:bg-neutral-900 hover:text-neutral-200 border border-transparent'
@@ -111,8 +123,18 @@ export function Sidebar({
             <MessageSquare size={14} className="shrink-0 opacity-60" />
             <span className="flex-1 truncate">{s.title}</span>
             <span
+              role="button"
+              tabIndex={0}
               onClick={(e) => handleDelete(e, s.session_id)}
-              className="opacity-0 group-hover:opacity-100 text-neutral-500 hover:text-red-400 transition-opacity p-1"
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault()
+                  handleDelete(e as unknown as React.MouseEvent, s.session_id)
+                }
+              }}
+              aria-label="حذف گفتگو"
+              title="حذف گفتگو"
+              className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 max-sm:opacity-100 text-neutral-500 hover:text-red-400 transition-opacity p-1 cursor-pointer"
             >
               <Trash2 size={13} />
             </span>
@@ -127,7 +149,7 @@ export function Sidebar({
         </div>
         <button
           onClick={onLogout}
-          className="w-full flex items-center justify-center gap-2 h-9 rounded-lg border border-neutral-800 text-neutral-400 hover:text-white hover:border-neutral-700 text-sm transition-colors"
+          className="w-full flex items-center justify-center gap-2 h-9 rounded-lg border border-neutral-800 text-neutral-400 hover:text-white hover:border-neutral-700 text-sm transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#E08A4F]/60"
         >
           <LogOut size={14} />
           خروج

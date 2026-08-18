@@ -4,7 +4,7 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { ChatMessage as ChatMessageType } from '@/lib/types'
 import { TechnicalDetails } from './technical-details'
-import { AlertTriangle } from 'lucide-react'
+import { AlertTriangle, User } from 'lucide-react'
 
 const ERROR_PREFIXES = ['خطا', 'متاسفانه']
 
@@ -31,8 +31,9 @@ export function ChatMessageItem({
               ? 'bg-neutral-800 text-neutral-300'
               : 'bg-gradient-to-br from-[#E08A4F] to-[#8B4A28] text-white shadow-[0_0_15px_-3px_rgba(224,138,79,0.6)]'
           }`}
+          aria-hidden="true"
         >
-          {isUser ? 'U' : 'R'}
+          {isUser ? <User size={15} /> : 'R'}
         </div>
 
         <div

@@ -1,7 +1,7 @@
 'use client'
 
 import Image from 'next/image'
-import { Menu, PanelLeft, PanelLeftClose } from 'lucide-react'
+import { Menu, PanelLeft } from 'lucide-react'
 
 type ChatHeaderProps = {
   showTechnical: boolean
@@ -26,21 +26,28 @@ export function ChatHeader({
       <div className="flex items-center gap-3">
         <button
           onClick={onOpenSidebar}
-          className="md:hidden w-9 h-9 -mr-1 flex items-center justify-center rounded-lg text-neutral-400 hover:text-white hover:bg-neutral-900 transition-colors"
+          className="md:hidden w-9 h-9 -mr-1 flex items-center justify-center rounded-lg text-neutral-400 hover:text-white hover:bg-neutral-900 transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#E08A4F]/60"
           aria-label="باز کردن منو"
+          title="باز کردن منو"
         >
           <Menu size={20} />
         </button>
 
-        <button
-          onClick={onToggleSidebar}
-          className="hidden md:flex w-9 h-9 -mr-1 items-center justify-center rounded-lg text-neutral-400 hover:text-white hover:bg-neutral-900 transition-colors"
-          aria-label={isSidebarCollapsed ? 'باز کردن سایدبار' : 'بستن سایدبار'}
-        >
-          {isSidebarCollapsed ? <PanelLeft size={20} /> : <PanelLeftClose size={20} />}
-        </button>
+        {/* Expand button — shown only while the desktop sidebar is collapsed.
+            Sits at the top edge of the main content, exactly on the sidebar
+            boundary, so it reads as the collapsed sidebar's re-open control. */}
+        {isSidebarCollapsed && (
+          <button
+            onClick={onToggleSidebar}
+            className="hidden md:flex w-9 h-9 -mr-1 items-center justify-center rounded-lg text-neutral-400 hover:text-white hover:bg-neutral-900 transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#E08A4F]/60"
+            aria-label="باز کردن نوار کناری"
+            title="باز کردن نوار کناری"
+          >
+            <PanelLeft size={20} />
+          </button>
+        )}
 
-                <div className="relative w-8 h-8 shrink-0">
+        <div className="relative w-8 h-8 shrink-0">
           <Image src="/logo.png" alt="Rad AI" width={32} height={32} className="w-8 h-8 object-contain" />
           <span className="absolute -bottom-0.5 -left-0.5 w-2.5 h-2.5 rounded-full bg-emerald-400 border-2 border-neutral-950" />
         </div>

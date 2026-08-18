@@ -201,6 +201,7 @@ export default function ChatPage() {
         isMobileOpen={isMobileSidebarOpen}
         onMobileClose={() => setIsMobileSidebarOpen(false)}
         collapsed={isSidebarCollapsed}
+        onToggleSidebar={toggleSidebar}
       />
 
       <div className="flex-1 flex flex-col min-w-0 h-full overflow-hidden">
@@ -240,7 +241,9 @@ export default function ChatPage() {
           {!isNearBottom && (
             <button
               onClick={scrollToLatest}
-              className="absolute bottom-4 left-1/2 -translate-x-1/2 z-10 flex items-center gap-2 h-9 px-4 rounded-full bg-neutral-900 border border-neutral-700 text-neutral-200 text-xs shadow-lg hover:bg-neutral-800 transition-colors"
+              className="absolute bottom-4 left-1/2 -translate-x-1/2 z-10 flex items-center gap-2 h-9 px-4 rounded-full bg-neutral-900 border border-neutral-700 text-neutral-200 text-xs shadow-lg hover:bg-neutral-800 transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#E08A4F]/60"
+              aria-label="بازگشت به آخرین پیام"
+              title="بازگشت به آخرین پیام"
             >
               <ArrowDown size={14} />
               بازگشت به آخرین پیام
