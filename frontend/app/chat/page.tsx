@@ -11,6 +11,7 @@ import { KpiCards } from '@/components/chat/kpi-cards'
 import { ThinkingIndicator } from '@/components/chat/thinking-indicator'
 import { StoredUser, ChatMessage, StepDetail } from '@/lib/types'
 import { askQuestionStream, createSession, saveMessage, loadMessages } from '@/lib/api'
+import { ArrowDown } from 'lucide-react'
 
 let cachedUser: StoredUser | null = null
 let cachedRaw: string | null | undefined
@@ -51,7 +52,41 @@ export default function ChatPage() {
   const [sidebarRefreshKey, setSidebarRefreshKey] = useState(0)
   const [confidentialNotice, setConfidentialNotice] = useState(false)
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false)
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return false
+    return localStorage.getItem('rad_ai_sidebar_collapsed') === '1'
+  })
+  const [isNearBottom, setIsNearBottom] = useState(true)
   const scrollRef = useRef<HTMLDivElement>(null)
+  const followRef = useRef(true)
+  const SCROLL_THRESHOLD = 120
+
+  const toggleSidebar = useCallback(() => {
+    setIsSidebarCollapsed((prev) => {
+      const next = !prev
+      if (typeof window !== 'undefined') {
+        localStorage.setItem('rad_ai_sidebar_collapsed', next ? '1' : '0')
+      }
+      return next
+    })
+  }, [])
+
+  const handleScroll = useCallback(() => {
+    const el = scrollRef.current
+    if (!el) return
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight
+    const near = distanceFromBottom < SCROLL_THRESHOLD
+    followRef.current = near
+    setIsNearBottom(near)
+  }, [])
+
+  const scrollToLatest = useCallback(() => {
+    const el = scrollRef.current
+    if (!el) return
+    followRef.current = true
+    setIsNearBottom(true)
+    el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' })
+  }, [])
 
   useEffect(() => {
     if (!localStorage.getItem('rad_ai_user')) {
@@ -60,10 +95,18 @@ export default function ChatPage() {
   }, [router])
 
   useEffect(() => {
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' })
-  }, [messages, isLoading])
+    const el = scrollRef.current
+    if (!el) return
+    // Only follow the conversation if the user is (or chose to be) at the
+    // bottom — never force someone who scrolled up back to the latest token.
+    if (followRef.current) {
+      el.scrollTop = el.scrollHeight
+    }
+  }, [messages])
 
   const handleNewConversation = useCallback(() => {
+    followRef.current = true
+    setIsNearBottom(true)
     setSessionId(null)
     setMessages([])
     setConfidentialNotice(false)
@@ -73,6 +116,8 @@ export default function ChatPage() {
     async (id: string) => {
       if (!user) return
       const msgs = await loadMessages(user.user_id, id)
+      followRef.current = true
+      setIsNearBottom(true)
       setSessionId(id)
       setMessages(msgs)
       setConfidentialNotice(false)
@@ -155,6 +200,7 @@ export default function ChatPage() {
         refreshKey={sidebarRefreshKey}
         isMobileOpen={isMobileSidebarOpen}
         onMobileClose={() => setIsMobileSidebarOpen(false)}
+        collapsed={isSidebarCollapsed}
       />
 
       <div className="flex-1 flex flex-col min-w-0 h-full overflow-hidden">
@@ -162,30 +208,44 @@ export default function ChatPage() {
           showTechnical={showTechnical}
           onToggleTechnical={setShowTechnical}
           onOpenSidebar={() => setIsMobileSidebarOpen(true)}
+          isSidebarCollapsed={isSidebarCollapsed}
+          onToggleSidebar={toggleSidebar}
         />
 
-        <div ref={scrollRef} className="flex-1 min-h-0 overflow-y-auto px-4 md:px-8 py-6">
-          <div className="max-w-3xl mx-auto">
-            {messages.length === 0 && !isLoading && (
-              <>
-                <KpiCards />
-                <EmptyState onPick={handleSend} />
-              </>
-            )}
+        <div className="relative flex-1 min-h-0 overflow-hidden">
+          <div ref={scrollRef} onScroll={handleScroll} className="h-full overflow-y-auto px-4 md:px-8 py-6">
+            <div className="max-w-3xl mx-auto">
+              {messages.length === 0 && !isLoading && (
+                <>
+                  <KpiCards />
+                  <EmptyState onPick={handleSend} />
+                </>
+              )}
 
-            <div className="space-y-4">
-              {messages.map((m, i) => (
-                <ChatMessageItem key={i} message={m} showTechnical={showTechnical} />
-              ))}
-              {isLoading && <ThinkingIndicator />}
+              <div className="space-y-4">
+                {messages.map((m, i) => (
+                  <ChatMessageItem key={i} message={m} showTechnical={showTechnical} />
+                ))}
+                {isLoading && <ThinkingIndicator />}
+              </div>
+
+              {confidentialNotice && (
+                <p className="text-xs text-neutral-500 mt-3 text-center">
+                  🔒 این گفتگو شامل اطلاعات محرمانه است و در تاریخچه ذخیره نمی‌شود.
+                </p>
+              )}
             </div>
-
-            {confidentialNotice && (
-              <p className="text-xs text-neutral-500 mt-3 text-center">
-                🔒 این گفتگو شامل اطلاعات محرمانه است و در تاریخچه ذخیره نمی‌شود.
-              </p>
-            )}
           </div>
+
+          {!isNearBottom && (
+            <button
+              onClick={scrollToLatest}
+              className="absolute bottom-4 left-1/2 -translate-x-1/2 z-10 flex items-center gap-2 h-9 px-4 rounded-full bg-neutral-900 border border-neutral-700 text-neutral-200 text-xs shadow-lg hover:bg-neutral-800 transition-colors"
+            >
+              <ArrowDown size={14} />
+              بازگشت به آخرین پیام
+            </button>
+          )}
         </div>
 
         <ChatInputBar onSend={handleSend} disabled={isLoading} />

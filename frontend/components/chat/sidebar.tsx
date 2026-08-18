@@ -21,6 +21,7 @@ type SidebarProps = {
   refreshKey: number
   isMobileOpen: boolean
   onMobileClose: () => void
+  collapsed?: boolean
 }
 
 export function Sidebar({
@@ -32,6 +33,7 @@ export function Sidebar({
   refreshKey,
   isMobileOpen,
   onMobileClose,
+  collapsed = false,
 }: SidebarProps) {
   const [sessions, setSessions] = useState<SessionSummary[]>([])
 
@@ -71,8 +73,9 @@ export function Sidebar({
           fixed md:static top-0 bottom-0 right-0 z-50
           h-screen md:h-full
           w-72 shrink-0 flex flex-col border-l border-neutral-800/80 bg-neutral-950 md:bg-neutral-950/60 backdrop-blur-sm
-          transition-transform duration-300 ease-in-out
+          transition-[transform,width] duration-300 ease-in-out
           ${isMobileOpen ? 'translate-x-0' : 'translate-x-full md:translate-x-0'}
+          ${collapsed ? 'md:w-0 md:overflow-hidden md:border-l-0 md:invisible' : 'md:w-72'}
           md:flex
         `}
         dir="rtl"

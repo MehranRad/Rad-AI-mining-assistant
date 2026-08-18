@@ -1,15 +1,23 @@
 'use client'
 
 import Image from 'next/image'
-import { Menu } from 'lucide-react'
+import { Menu, PanelLeft, PanelLeftClose } from 'lucide-react'
 
 type ChatHeaderProps = {
   showTechnical: boolean
   onToggleTechnical: (v: boolean) => void
   onOpenSidebar: () => void
+  isSidebarCollapsed: boolean
+  onToggleSidebar: () => void
 }
 
-export function ChatHeader({ showTechnical, onToggleTechnical, onOpenSidebar }: ChatHeaderProps) {
+export function ChatHeader({
+  showTechnical,
+  onToggleTechnical,
+  onOpenSidebar,
+  isSidebarCollapsed,
+  onToggleSidebar,
+}: ChatHeaderProps) {
   return (
     <header
       className="flex items-center justify-between px-4 md:px-6 py-4 border-b border-neutral-800/80 bg-neutral-950/40 backdrop-blur-sm"
@@ -22,6 +30,14 @@ export function ChatHeader({ showTechnical, onToggleTechnical, onOpenSidebar }: 
           aria-label="باز کردن منو"
         >
           <Menu size={20} />
+        </button>
+
+        <button
+          onClick={onToggleSidebar}
+          className="hidden md:flex w-9 h-9 -mr-1 items-center justify-center rounded-lg text-neutral-400 hover:text-white hover:bg-neutral-900 transition-colors"
+          aria-label={isSidebarCollapsed ? 'باز کردن سایدبار' : 'بستن سایدبار'}
+        >
+          {isSidebarCollapsed ? <PanelLeft size={20} /> : <PanelLeftClose size={20} />}
         </button>
 
                 <div className="relative w-8 h-8 shrink-0">

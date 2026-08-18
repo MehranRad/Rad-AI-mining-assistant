@@ -21,6 +21,7 @@ from schema_constants import (
     EQUIPMENT_MANUFACTURERS,
     EQUIPMENT_STATUSES,
     STATUS_GLOSS,
+    STATUS_RUNNING,
 )
 
 load_dotenv()
@@ -120,6 +121,12 @@ Table Production (~45000 records):
 - Shift exact values: {fmt_values(PRODUCTION_SHIFTS)}
 - RecoveryRate is a percentage (0-100). DowntimeHours is hours, NOT a percentage.
 
+IMPORTANT — AGGREGATION (SUM vs AVG vs COUNT):
+- Read the question's wording carefully and use the aggregation it actually asks for:
+  - "مجموع", "کل", "جمع کل", "تعداد کل", "total", "sum" -> use SUM(...) (or COUNT(...) for counts).
+  - "میانگین", "متوسط", "average", "avg" -> use AVG(...).
+  - Never answer a TOTAL question with AVG(...), and never answer an AVERAGE question with SUM(...).
+
 IMPORTANT SECURITY RULES FOR SQL GENERATION:
 - Only write AGGREGATE queries (COUNT, AVG, SUM, GROUP BY) for the Employees table.
 - NEVER filter Employees by a specific person's name or ID (e.g. WHERE FirstName='حسین').
@@ -176,6 +183,20 @@ SELECT Mine,
        SUM(CASE WHEN Gender = '{GENDERS[1]}' THEN 1 ELSE 0 END) AS FemaleCount
 FROM Employees
 GROUP BY Mine
+"""
+
+# For questions like "which mine extracts the most ore relative to its ACTIVE
+# equipment count" — computed in Python, never left to the LLM. Total extracted
+# ore is SUM (not AVG), active equipment is COUNT where Status is the running
+# value; the two aggregates are joined per mine (never row-by-row).
+FIXED_PRODUCTION_PER_ACTIVE_EQUIPMENT_QUERY = f"""
+SELECT p.Mine,
+       p.TotalOreTon AS TotalOreTon,
+       e.ActiveEquipmentCount AS ActiveEquipmentCount
+FROM (SELECT Mine, SUM(CopperOreTon) AS TotalOreTon FROM Production GROUP BY Mine) p
+JOIN (SELECT Mine, COUNT(EquipmentID) AS ActiveEquipmentCount
+      FROM Equipment WHERE Status = '{STATUS_RUNNING}' GROUP BY Mine) e
+ON p.Mine = e.Mine
 """
 
 REFUSAL_MESSAGES = {
@@ -715,14 +736,13 @@ def compute_comparison_stats(raw_result):
     lowest_recovery_mine = stats_sorted[-1]["mine"]
     highest_recovery_mine = stats_sorted[0]["mine"]
     max_recovery_spread = top["recovery"] - stats_sorted[-1]["recovery"]
-    spread_flag = "NOT meaningful (essentially all mines perform similarly)" if max_recovery_spread < 1.0 else "potentially meaningful"
 
     lines = [
         f"IMPORTANT — verified facts, do not contradict these: the mine with "
         f"the HIGHEST recovery rate is {highest_recovery_mine}; the mine with "
         f"the LOWEST recovery rate is {lowest_recovery_mine}. The total spread "
-        f"between highest and lowest is only {max_recovery_spread:.2f} points, "
-        f"which is {spread_flag}. If the user asked about a specific mine, "
+        f"between highest and lowest is {max_recovery_spread:.2f} points. "
+        f"If the user asked about a specific mine, "
         f"check its ACTUAL rank below before claiming it is 'the lowest' or "
         f"'the highest' — do not assume the mine named in the question is "
         f"automatically the extreme case.",
@@ -737,13 +757,11 @@ def compute_comparison_stats(raw_result):
         downtime_diff = s["downtime"] - min_downtime["downtime"]
         energy_diff = s["energy"] - max_energy["energy"]
         fuel_diff = s["fuel"] - max_fuel["fuel"]
-        recovery_flag = "NOT meaningful" if recovery_diff < 1.0 else "potentially meaningful"
-        downtime_flag = "NOT meaningful" if downtime_diff < 0.5 else "potentially meaningful"
         lines.append(
             f"- {s['mine']}: Recovery Rate = {s['recovery']:.2f}% "
-            f"(diff from highest = {recovery_diff:.2f} pts, {recovery_flag}); "
+            f"(diff from highest = {recovery_diff:.2f} pts); "
             f"Downtime = {s['downtime']:.2f}h "
-            f"(diff from lowest = {downtime_diff:.2f}h, {downtime_flag}); "
+            f"(diff from lowest = {downtime_diff:.2f}h); "
             f"Working Hours = {s['working_hours']:.2f}h; "
             f"Energy Consumption = {s['energy']:.2f} "
             f"(diff from highest = {energy_diff:.2f}); "
@@ -875,6 +893,62 @@ def compute_production_per_workforce_ratio(production_raw, workforce_raw):
     lines.append(f"HIGHEST output-per-employee mine: {ratios[0][0]}")
     return "\n".join(lines)
 
+
+def compute_production_per_active_equipment_ratio(raw_result):
+    """
+    For questions like "which mine extracts the most ore relative to its ACTIVE
+    equipment count", computes TotalCopperOreTon ÷ ActiveEquipmentCount per mine
+    in Python — never left to the LLM (the LLM previously produced wrong ratios
+    and dumped unrelated production metrics). Uses SUM of extracted ore (never
+    AVG) and COUNT of equipment whose Status is the running value.
+    """
+    if isinstance(raw_result, str) and raw_result.startswith("SQL_ERROR"):
+        return None
+    try:
+        rows = ast.literal_eval(raw_result) if isinstance(raw_result, str) else raw_result
+        if not isinstance(rows, list) or len(rows) == 0:
+            return None
+    except Exception:
+        return None
+
+    ratios = []
+    for r in rows:
+        mine, total_ore, active_count = r[0], r[1], r[2]
+        try:
+            count = int(active_count)
+            ore = float(total_ore)
+        except (TypeError, ValueError):
+            continue
+        if count > 0:
+            ratios.append((mine, ore / count))
+    if not ratios:
+        return None
+    ratios.sort(key=lambda x: x[1], reverse=True)
+
+    lines = [
+        "Total extracted ore per ACTIVE equipment (SUM(CopperOreTon) ÷ count of "
+        "equipment with Status='در حال کار', per mine) — precomputed, use these "
+        "EXACT numbers verbatim, do not recompute or approximate:"
+    ]
+    for mine, ratio in ratios:
+        lines.append(f"- {mine}: {ratio:.3f} tons of ore per active equipment")
+    lines.append(f"HIGHEST ore-per-active-equipment mine: {ratios[0][0]}")
+    return "\n".join(lines)
+
+
+def is_production_per_equipment_question(question: str) -> bool:
+    """True for questions about production output relative to the number of
+    (active) equipment — e.g. "کدام معدن نسبت به تعداد تجهیزات فعالش، بیشترین
+    حجم سنگ استخراج‌شده را دارد؟". Gates the precomputed ore-per-equipment
+    ratio so it is only produced for genuinely ratio-style equipment questions."""
+    q = question
+    has_ratio_signal = any(w in q for w in ["نسبت", "به ازای", "به‌ازای", "به تعداد", "هر تجهیز"])
+    has_equipment = any(w in q for w in ["تجهیز", "ماشین‌آلات", "ماشین"]) or "equipment" in q.lower()
+    has_production = any(
+        w in q for w in ["سنگ", "استخراج", "تولید", "کنسانتره", "سنگ‌معادن"]
+    ) or any(w in q.lower() for w in ["ore", "extract", "production", "tonnage"])
+    return has_ratio_signal and has_equipment and has_production
+
 def classify_question_complexity(question: str) -> bool:
     try:
         prompt = f"""A user asked this question (possibly in Persian) about a mining company's data:
@@ -917,45 +991,37 @@ def detect_question_topics(question: str) -> set:
 
 def _build_final_answer_prompt(question: str, context_blocks: list) -> str:
     """Single source of truth for the final-answer prompt shared by the
-    streaming and non-streaming paths."""
+    streaming and non-streaming paths. Enforces a concise BI-assistant
+    answer policy: answer exactly what was asked, then stop."""
     joined_context = "\n\n".join(context_blocks)
-    return f"""You are a professional data analyst for a copper mining company in Iran.
+    return f"""You are a data Q&A assistant for a copper mining company in Iran. You answer the user's question directly and concisely, like a professional BI assistant, and then stop.
 
 The user asked (in Persian): {question}
 
 Here is the data you retrieved:
 {joined_context}
 
-Write your ENTIRE answer in Persian (Farsi), in clear professional business language.
-Keep mine names, numbers, and technical terms as they are.
+Write your ENTIRE answer in Persian (Farsi), natural and professional. Use Persian digits where appropriate. Keep mine names and technical terms verbatim (mine names may contain a ZWNJ half-space).
 
 CRITICAL RULES:
-- If the data contains a salary, wage, or payment figure (Salary, OvertimePay),
-  always state the currency as "تومان" — never write "ریال" or omit the currency.
-- ONLY talk about topics that are present in the data above.
-- NEVER invent, estimate, or guess a number that is not explicitly present in the data above.
-- NEVER invent a field/metric name that is not literally present in the data above
-  (e.g. do not say "OvertimePay" or "تولید" if no such value was given to you —
-  only refer to fields that are explicitly labeled in the data blocks).
-- COPY every number EXACTLY as given — same digits, same magnitude. Never add,
-  drop, or shift digits (e.g. do not turn 25,139,553,834 into 251,395,538,340).
-- If a line starting with "IMPORTANT — verified facts" is present in the data,
-  treat every number/entity in it as ALREADY CORRECT and FINAL — quote it
-  directly, never recompute it yourself or produce a different number for the
-  same comparison.
-- When describing a difference in percentage points, say "واحد درصد" or
-  "امتیاز درصد" — never translate "points" as "پیوند".
-- NEVER assume the mine/entity named in the user's question is automatically the
-  "highest" or "lowest" on any metric — always verify this against the actual
-  ranking given in the data before making such a claim.
-- If a difference is explicitly labeled "NOT meaningful" in the data above, say so
-  plainly (e.g. "تفاوت معناداری بین معادن مشاهده نمی‌شود") rather than treating a
-  small numeric difference as if it were a significant problem requiring action.
-- If differences/percentages are already labeled above, use those exact numbers and translate
-  the labels into Persian yourself. Do NOT recalculate or re-judge significance.
-- If a query failed or is marked unavailable, say so clearly in Persian instead of guessing.
-- Be concise. Do not add unnecessary sections.
-- Write the final answer ONLY in Persian."""
+1. Answer EXACTLY what the user asked, then stop. State the conclusion first. Never keep explaining after the question is answered.
+2. Length policy:
+   - One-value question -> ONE concise sentence (e.g. "میانگین عمر مفید تجهیزات در حال کار در معدن سونگون ۱۴.۲ سال است.").
+   - Status/list question -> one compact sentence or a short bullet list with the total; do not repeat those numbers in prose afterwards.
+   - Comparison question -> only the values needed for the comparison (1-3 sentences or a compact table).
+   - Ranking question -> the winner with its value, plus a short ranked list only if useful. No unrelated metrics.
+   - Multi-part question -> answer each requested part briefly.
+   - If the user explicitly asks for a full explanation ("توضیح کامل", "جزئیات", "تحلیل"), provide more detail. Otherwise keep it concise.
+3. NEVER include the SQL query, raw database result rows/tuples, Python calculations, or internal details in the answer. No sections titled "جزئیات فنی", "SQL Query", or "Query Result". Present only the final human-readable result.
+4. NEVER state the same conclusion twice. Do not use filler such as "در نتیجه", "بنابراین", "با توجه به داده‌های موجود", "لازم به ذکر است", "نکته مهم" unless they add real value.
+5. NEVER claim statistical significance or correlation ("معنادار", "غیرمعنادار", "از نظر آماری معنادار", "همبستگی", "رابطه علت‌ومعلولی") unless the data above explicitly states that a statistical test was performed. A plain numeric difference is NOT significance — just report the numbers.
+6. NEVER present an average as a total/sum. If the user asked for a total ("مجموع", "کل") but the data provides only averages, say briefly that the total is not available from the provided data instead of presenting an average as the total.
+7. Only talk about data that is literally present above. If the requested information is not in the data (e.g. a field that does not exist), say so briefly and stop; do NOT substitute unrelated metrics.
+8. COPY every number exactly — never change digits or magnitude. Round reasonably only when the raw value has excessive decimals (e.g. 82.591636 -> 82.59%). Label salary/wage figures as "تومان", RecoveryRate as percent, DowntimeHours as hours. For percentage-point differences say "واحد درصد"/"امتیاز درصد", never "پیوند".
+9. If a line starting with "IMPORTANT — verified facts" is present, treat its numbers as final — quote them directly, never recompute.
+10. If a query failed or is marked unavailable, say so clearly in one sentence.
+11. NEVER invent a field/metric name that is not literally present in the data above. Only refer to fields explicitly labeled in the data blocks.
+12. Write the ENTIRE answer in Persian."""
 
 
 def generate_final_answer(question: str, context_blocks: list) -> str:
@@ -1122,6 +1188,15 @@ def ask_question(question: str, role: str = "staff", username: str = "unknown",
                 if ratio_block:
                     context_blocks.append(ratio_block)
 
+            if "production" in topics and "equipment" in topics and is_production_per_equipment_question(resolved_question):
+                result_pe = run_sql(FIXED_PRODUCTION_PER_ACTIVE_EQUIPMENT_QUERY)
+                pe_block = compute_production_per_active_equipment_ratio(result_pe)
+                if pe_block:
+                    steps.append({"label": "سنگ استخراج‌شده به‌ازای هر تجهیز فعال",
+                                  "sql": FIXED_PRODUCTION_PER_ACTIVE_EQUIPMENT_QUERY.strip(),
+                                  "result": str(result_pe)})
+                    context_blocks.append(pe_block)
+
             if not context_blocks:
                 context_blocks.append("No relevant data could be retrieved for this question.")
 
@@ -1275,6 +1350,15 @@ def ask_question_stream(question: str, role: str = "staff", username: str = "unk
                 )
                 if ratio_block:
                     context_blocks.append(ratio_block)
+
+            if "production" in topics and "equipment" in topics and is_production_per_equipment_question(resolved_question):
+                result_pe = run_sql(FIXED_PRODUCTION_PER_ACTIVE_EQUIPMENT_QUERY)
+                pe_block = compute_production_per_active_equipment_ratio(result_pe)
+                if pe_block:
+                    steps.append({"label": "سنگ استخراج‌شده به‌ازای هر تجهیز فعال",
+                                  "sql": FIXED_PRODUCTION_PER_ACTIVE_EQUIPMENT_QUERY.strip(),
+                                  "result": str(result_pe)})
+                    context_blocks.append(pe_block)
 
             if not context_blocks:
                 context_blocks.append("No relevant data could be retrieved for this question.")
