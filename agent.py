@@ -180,7 +180,9 @@ SELECT Mine,
        AVG(Salary) AS AvgSalary,
        AVG(Age) AS AvgAge,
        SUM(CASE WHEN Gender = '{GENDERS[0]}' THEN 1 ELSE 0 END) AS MaleCount,
-       SUM(CASE WHEN Gender = '{GENDERS[1]}' THEN 1 ELSE 0 END) AS FemaleCount
+       SUM(CASE WHEN Gender = '{GENDERS[1]}' THEN 1 ELSE 0 END) AS FemaleCount,
+       SUM(OvertimeHours) AS TotalOvertimeHours,
+       AVG(OvertimeHours) AS AvgOvertimeHours
 FROM Employees
 GROUP BY Mine
 """
@@ -221,6 +223,42 @@ SELECT Manufacturer,
 FROM Equipment
 GROUP BY Manufacturer
 ORDER BY AVG(PurchasePrice) DESC
+"""
+
+# ---------------------------------------------------------------------------
+# RISK intent ("کدام معدن بیشترین ریسک را دارد؟", "ریسک‌ها چی هستند؟", ...)
+#
+# The schema has NO official risk score / Risk column, so a risk question is
+# answered transparently from the available operational indicators closest to
+# risk: low RecoveryRate, high DowntimeHours, low WorkingHours (Production),
+# and many equipment out of service (در تعمیر / از رده خارج). These two focused
+# queries are the ONLY data pulled for a risk question — never workforce/salary,
+# never the full production/equipment bundles.
+# ---------------------------------------------------------------------------
+
+RISK_QUESTION_KEYWORDS = [
+    "ریسک", "خطر", "risk", "شرایط بد", "شرایط عملیاتی", "وضعیت عملیاتی",
+]
+
+def is_risk_question(question: str) -> bool:
+    """True for operational-risk questions (which mine is riskiest, what are the
+    risks, which mine is in worse condition operationally, ...)."""
+    q = question.lower()
+    return any(w in q for w in RISK_QUESTION_KEYWORDS)
+
+FIXED_RISK_PRODUCTION_QUERY = """
+SELECT Mine,
+       AVG(RecoveryRate) AS AvgRecoveryRate,
+       AVG(DowntimeHours) AS AvgDowntimeHours,
+       AVG(WorkingHours) AS AvgWorkingHours
+FROM Production
+GROUP BY Mine
+"""
+
+FIXED_RISK_EQUIPMENT_QUERY = f"""
+SELECT Mine, Status, COUNT(EquipmentID) AS Count
+FROM Equipment
+GROUP BY Mine, Status
 """
 
 REFUSAL_MESSAGES = {
@@ -846,10 +884,10 @@ def compute_equipment_status_breakdown(raw_result):
 def compute_workforce_stats(raw_result):
     """
     Precomputes workforce breakdown per mine using ALL relevant fields
-    (headcount, avg salary, avg age, gender split) — not just headcount
-    and salary — per the requirement that analysis must be grounded in
-    every relevant field for a topic, not 1-2 columns. All arithmetic
-    is done here in Python, never left to the LLM.
+    (headcount, avg salary, avg age, gender split, overtime totals/averages)
+    — not just headcount and salary — per the requirement that analysis must
+    be grounded in every relevant field for a topic, not 1-2 columns. All
+    arithmetic is done here in Python, never left to the LLM.
     """
     if isinstance(raw_result, str) and raw_result.startswith("SQL_ERROR"):
         return None
@@ -865,6 +903,8 @@ def compute_workforce_stats(raw_result):
                 "avg_age": float(r[3]) if r[3] is not None else 0.0,
                 "male_count": int(r[4]) if r[4] is not None else 0,
                 "female_count": int(r[5]) if r[5] is not None else 0,
+                "total_overtime": float(r[6]) if r[6] is not None else 0.0,
+                "avg_overtime": float(r[7]) if r[7] is not None else 0.0,
             }
             for r in rows
         ]
@@ -874,13 +914,15 @@ def compute_workforce_stats(raw_result):
     stats_sorted = sorted(stats, key=lambda x: x["count"], reverse=True)
     lines = [
         "Workforce breakdown by mine (fields used: EmployeeCount, "
-        "AvgSalary, AvgAge, Gender split):"
+        "AvgSalary, AvgAge, Gender split, TotalOvertimeHours, "
+        "AvgOvertimeHours):"
     ]
     for s in stats_sorted:
         lines.append(
             f"- {s['mine']}: {s['count']} employees, average salary = {s['avg_salary']:.0f}, "
             f"average age = {s['avg_age']:.1f}, gender split = {s['male_count']} male / "
-            f"{s['female_count']} female"
+            f"{s['female_count']} female, total overtime = {s['total_overtime']:.2f}h, "
+            f"average overtime = {s['avg_overtime']:.2f}h"
         )
     return "\n".join(lines)
 
@@ -979,9 +1021,10 @@ def is_total_production_question(question: str) -> bool:
 
 
 def compute_production_totals(raw_result):
-    """Formats SUM totals across ALL production records. The model must NEVER
-    derive a total from the AVG figures in the comparison block — this is the
-    only sanctioned source for TOTAL answers."""
+    """Formats SUM totals across the queried production records (all mines, or
+    one mine when the query was scoped). The model must NEVER derive a total
+    from the AVG figures in the comparison block — this is the only sanctioned
+    source for TOTAL answers."""
     if isinstance(raw_result, str) and raw_result.startswith("SQL_ERROR"):
         return None
     try:
@@ -1001,7 +1044,7 @@ def compute_production_totals(raw_result):
         (5, "TotalCopperConcentrateTon", "کنسانتره"),
     ]
     lines = [
-        "TOTALS across ALL mines — these are SUMs over every production record "
+        "TOTALS — these are SUMs over the queried production records "
         "(NOT averages, NOT per-mine values). Use ONLY the single field the "
         "user asked about; ignore the rest:"
     ]
@@ -1047,6 +1090,113 @@ def compute_manufacturer_price_stats(raw_result):
     return "\n".join(lines)
 
 
+def compute_risk_indicators(prod_raw, eq_raw):
+    """
+    Combines the focused production risk indicators (AVG recovery, AVG
+    downtime, AVG working hours) with the equipment status counts (running /
+    in-repair / retired) into a transparent per-mine operational-risk profile.
+
+    The schema has NO official risk score, so this never invents one: it ranks
+    the mines by how bad each AVAILABLE indicator is (low recovery, high
+    downtime, low working hours, many in-repair/retired machines) and reports
+    which mine is worst overall, explicitly framed as "based on the available
+    operational indicators". No statistical test is performed, so no
+    significance claims are emitted. All arithmetic happens here in Python,
+    never left to the LLM.
+    """
+    if isinstance(prod_raw, str) and prod_raw.startswith("SQL_ERROR"):
+        return None
+    if isinstance(eq_raw, str) and eq_raw.startswith("SQL_ERROR"):
+        return None
+    try:
+        prod_rows = ast.literal_eval(prod_raw) if isinstance(prod_raw, str) else prod_raw
+        eq_rows = ast.literal_eval(eq_raw) if isinstance(eq_raw, str) else eq_raw
+        if not isinstance(prod_rows, list) or len(prod_rows) == 0:
+            return None
+        if not isinstance(eq_rows, list) or len(eq_rows) == 0:
+            return None
+    except Exception:
+        return None
+
+    status_running, status_repair, status_retired = EQUIPMENT_STATUSES
+    profiles = {}
+    for r in prod_rows:
+        try:
+            mine = r[0]
+            profiles[mine] = {
+                "mine": mine,
+                "recovery": float(r[1]) if r[1] is not None else 0.0,
+                "downtime": float(r[2]) if r[2] is not None else 0.0,
+                "working": float(r[3]) if r[3] is not None else 0.0,
+                "running": 0,
+                "repair": 0,
+                "retired": 0,
+            }
+        except (TypeError, ValueError, IndexError):
+            continue
+    if not profiles:
+        return None
+
+    eq_counts = defaultdict(lambda: defaultdict(int))
+    for r in eq_rows:
+        try:
+            eq_counts[r[0]][r[1]] = int(r[2])
+        except (TypeError, ValueError, IndexError):
+            continue
+    for mine, profile in profiles.items():
+        statuses = eq_counts.get(mine, {})
+        profile["running"] = statuses.get(status_running, 0)
+        profile["repair"] = statuses.get(status_repair, 0)
+        profile["retired"] = statuses.get(status_retired, 0)
+
+    # Worst-first rank (1 = worst) per indicator; combined rank is the sum.
+    ranks = defaultdict(int)
+    for i, p in enumerate(sorted(profiles.values(), key=lambda p: p["recovery"])):
+        ranks[p["mine"]] += i + 1
+    for i, p in enumerate(sorted(profiles.values(), key=lambda p: p["downtime"], reverse=True)):
+        ranks[p["mine"]] += i + 1
+    for i, p in enumerate(sorted(profiles.values(), key=lambda p: p["working"])):
+        ranks[p["mine"]] += i + 1
+    for i, p in enumerate(sorted(
+            profiles.values(),
+            key=lambda p: p["repair"] + p["retired"], reverse=True)):
+        ranks[p["mine"]] += i + 1
+
+    ordered = sorted(
+        profiles.values(),
+        key=lambda p: (ranks[p["mine"]], -p["recovery"], p["mine"]),
+    )
+    top = ordered[0]
+
+    lines = [
+        "IMPORTANT — verified facts: the schema has NO official risk score. The "
+        "mine showing the HIGHEST operational risk based on the available "
+        f"indicators below is {top['mine']}.",
+        "",
+        "Operational risk indicators by mine — there is no RiskScore column; "
+        "these are the closest AVAILABLE indicators (RecoveryRate is a "
+        "percentage; DowntimeHours and WorkingHours are hours; equipment counts "
+        "are by Status):",
+    ]
+    for p in ordered:
+        out_of_service = p["repair"] + p["retired"]
+        lines.append(
+            f"- {p['mine']}: recovery = {p['recovery']:.2f}%, downtime = "
+            f"{p['downtime']:.2f}h, working hours = {p['working']:.2f}h; "
+            f"equipment: running = {p['running']}, in repair = {p['repair']}, "
+            f"retired = {p['retired']} (out of service total = {out_of_service})"
+        )
+    lines.append(
+        "Mines ordered from most to least risky based on the indicators above "
+        "(low recovery, high downtime, low working hours, and many in-repair / "
+        "retired machines count as worse). This ordering is a plain ranking of "
+        "the numbers above, NOT a statistical test:"
+    )
+    for i, p in enumerate(ordered, start=1):
+        lines.append(f"{i}. {p['mine']}")
+    return "\n".join(lines)
+
+
 def is_production_per_equipment_question(question: str) -> bool:
     """True for questions about production output relative to the number of
     (active) equipment — e.g. "کدام معدن نسبت به تعداد تجهیزات فعالش، بیشترین
@@ -1066,9 +1216,15 @@ def classify_question_complexity(question: str) -> bool:
 
 "{question}"
 
-Does answering this well require combining MULTIPLE pieces of information (comparing 
-across mines, explaining causes, giving a general summary/overview, or assessing risk)?
-Or can it be answered with a SINGLE simple SQL query (a direct count, sum, average, or filter)?
+Does answering this well require combining MULTIPLE pieces of information — a broad
+overview/summary spanning several topics, explaining causes/relationships, or assessing
+risk from several indicators? 
+OR can it be answered with ONE single focused SQL query?
+
+Note: a single aggregate/ranking query that compares mines or equipment on ONE metric
+(e.g. "which mine has the highest recovery rate", "which mine has the most equipment in
+repair", "average or total of one metric") is SIMPLE — it needs exactly one query. Only
+broad / multi-part / risk / relationship / cause questions are COMPLEX.
 
 Answer with exactly one word: COMPLEX or SIMPLE"""
         response = llm.invoke(prompt)
@@ -1080,15 +1236,53 @@ Answer with exactly one word: COMPLEX or SIMPLE"""
         return any(w in q_lower for w in keywords_en) or any(w in question for w in keywords_fa)
 
 
+def _llm_select_topic(question: str) -> str:
+    """
+    Robust fallback used by detect_question_topics() when NO domain keyword
+    matched: instead of assuming every domain (which made broad questions like
+    "کدام معدن بیشترین ریسک را دارد؟" run an unrelated bundle of
+    production+equipment+workforce queries), ask the LLM which single domain the
+    question is most about. Returns 'production' if the LLM is unavailable or
+    gives an unparseable answer.
+    """
+    try:
+        prompt = f"""A user asked this question (possibly in Persian) about a copper-mining company's data:
+"{question}"
+
+Which ONE domain is this question MOST about?
+- Equipment: machines, their status, condition, or price (تجهیزات، ماشین‌آلات، وضعیت تجهیزات)
+- Production: extraction, output, recovery, downtime, energy, fuel (تولید، استخراج، نرخ بازیابی، توقف)
+- Workforce: employees, headcount, salary, shifts, departments (کارکنان، حقوق، پرسنل)
+
+Answer with exactly one word: Equipment, Production, or Workforce"""
+        response = llm.invoke(prompt)
+        answer = response.content.strip().lower()
+        for key, word in [("equipment", "equipment"), ("production", "production"),
+                          ("workforce", "workforce")]:
+            if word in answer:
+                return key
+        return "production"
+    except Exception:
+        return "production"
+
+
 def detect_question_topics(question: str) -> set:
     q = question.lower()
     topics = set()
-    equipment_keywords = ["تجهیزات", "ماشین", "وضعیت", "equipment", "status",
+    # NOTE: "وضعیت" alone is deliberately NOT an equipment keyword — it appears
+    # in equipment ("وضعیت تجهیزات..."), workforce ("وضعیت نیروی انسانی...")
+    # and risk ("وضعیت ریسک...") questions alike. The specific noun that
+    # follows it ("تجهیزات", "دستگاه", "نیروی انسانی", "ریسک") is the real
+    # topic signal.
+    equipment_keywords = ["تجهیزات", "دستگاه", "ماشین", "equipment", "status",
                           "running", "maintenance", "stopped", "تعمیر", "متوقف", "فعال"]
     production_keywords = ["بازیابی", "توقف", "تولید", "recovery", "downtime", "production",
                             "نرخ", "سنگ", "کنسانتره", "ساعت کار", "انرژی", "سوخت"]
     workforce_keywords = ["کارمند", "حقوق", "نیروی", "پرسنل", "employee", "salary",
-                           "workforce", "استخدام", "شیفت", "دپارتمان", "شغل"]
+                           "workforce", "استخدام", "شیفت", "دپارتمان", "شغل",
+                           "اضافه‌کاری", "اضافه کاری", "overtime"]
+    if is_risk_question(question):
+        topics.add("risk")
     if any(w in q for w in equipment_keywords):
         topics.add("equipment")
     if any(w in q for w in production_keywords):
@@ -1096,8 +1290,61 @@ def detect_question_topics(question: str) -> set:
     if any(w in q for w in workforce_keywords):
         topics.add("workforce")
     if not topics:
-        topics = {"equipment", "production", "workforce"}
+        # Never assume every topic on a keyword miss — pick the single most
+        # relevant domain so broad questions don't dump unrelated bundles.
+        topics = {_llm_select_topic(question)}
     return topics
+
+
+def extract_mine(question: str):
+    """
+    Returns the Mine name mentioned in the question, or None. Matches the real
+    Persian mine names ZWNJ-aware (a user may type خاتون‌آباد with or without the
+    half-space), so a question naming one mine can scope the fixed analytics
+    queries down to that mine instead of comparing all four.
+    """
+    if not question:
+        return None
+    for mine in MINES:
+        if mine in question:
+            return mine
+    for mine in MINES:
+        if mine.replace("\u200c", "") in question:
+            return mine
+    return None
+
+
+def _mine_like_pattern(mine: str) -> str:
+    """ZWNJ-safe LIKE pattern for a mine name: the half-space becomes a
+    wildcard so both خاتون‌آباد (with ZWNJ) and خاتونآباد (without) match."""
+    return "%" + mine.replace("\u200c", "%") + "%"
+
+
+def _production_analytics_query(mine=None) -> str:
+    """FIXED_RECOVERY_DOWNTIME_QUERY, scoped to one mine when named."""
+    if mine is None:
+        return FIXED_RECOVERY_DOWNTIME_QUERY
+    return FIXED_RECOVERY_DOWNTIME_QUERY.replace(
+        "FROM Production", f"FROM Production\nWHERE Mine LIKE '{_mine_like_pattern(mine)}'", 1
+    )
+
+
+def _equipment_status_query(mine=None) -> str:
+    """FIXED_EQUIPMENT_STATUS_QUERY, scoped to one mine when named."""
+    if mine is None:
+        return FIXED_EQUIPMENT_STATUS_QUERY
+    return FIXED_EQUIPMENT_STATUS_QUERY.replace(
+        "FROM Equipment", f"FROM Equipment\nWHERE Mine LIKE '{_mine_like_pattern(mine)}'", 1
+    )
+
+
+def _production_totals_query(mine=None) -> str:
+    """FIXED_PRODUCTION_TOTALS_QUERY, scoped to one mine when named."""
+    if mine is None:
+        return FIXED_PRODUCTION_TOTALS_QUERY
+    return FIXED_PRODUCTION_TOTALS_QUERY.replace(
+        "FROM Production", f"FROM Production\nWHERE Mine LIKE '{_mine_like_pattern(mine)}'", 1
+    )
 
 
 def _build_final_answer_prompt(question: str, context_blocks: list) -> str:
@@ -1165,6 +1412,119 @@ def generate_final_answer_stream(question: str, context_blocks: list):
             "لطفاً چند لحظه صبر کنید و دوباره تلاش کنید.\n\n"
             f"(جزئیات فنی خطا: {str(e)})"
         )
+
+
+def _collect_complex_context(question: str, role: str, steps: list):
+    """
+    Shared complex-question data collection used by both ask_question() and
+    ask_question_stream(). Routes each question to the MINIMUM queries that can
+    answer it instead of blindly running every fixed analytics block:
+      - risk questions      -> focused production risk indicators + equipment
+                               status counts ONLY (never workforce/salary, never
+                               the full comparison bundles).
+      - total/sum questions -> the SUM totals block ONLY (never the AVG
+                               comparison or the equipment breakdown).
+      - otherwise           -> topic-gated analytics; a named mine scopes the
+                               production/equipment/totals queries to that mine,
+                               and workforce is only queried when the question is
+                               genuinely about employees.
+    """
+    context_blocks = []
+    topics = detect_question_topics(question)
+
+    if "risk" in topics:
+        prod_raw = run_sql(FIXED_RISK_PRODUCTION_QUERY)
+        eq_raw = run_sql(FIXED_RISK_EQUIPMENT_QUERY)
+        steps.append({"label": "شاخص‌های تولید مرتبط با ریسک (بازیابی و توقف)",
+                      "sql": FIXED_RISK_PRODUCTION_QUERY.strip(), "result": str(prod_raw)})
+        steps.append({"label": "تعداد تجهیزات بر اساس وضعیت",
+                      "sql": FIXED_RISK_EQUIPMENT_QUERY.strip(), "result": str(eq_raw)})
+        risk_block = compute_risk_indicators(prod_raw, eq_raw)
+        if risk_block:
+            context_blocks.append(risk_block)
+        return context_blocks
+
+    if "production" in topics and is_total_production_question(question):
+        mine = extract_mine(question)
+        totals_sql = _production_totals_query(mine)
+        result_tot = run_sql(totals_sql)
+        totals_block = compute_production_totals(result_tot)
+        if totals_block:
+            steps.append({"label": "جمع کل شاخص‌های تولید",
+                          "sql": totals_sql.strip(),
+                          "result": str(result_tot)})
+            context_blocks.append(totals_block)
+        return context_blocks
+
+    mine = extract_mine(question)
+    production_result_for_ratio = None
+    workforce_result_for_ratio = None
+
+    if "production" in topics:
+        sql_p = _production_analytics_query(mine)
+        result1 = run_sql(sql_p)
+        stats1 = compute_comparison_stats(result1) or f"[Query failed: {result1}]"
+        steps.append({"label": "مقایسه نرخ بازیابی و توقف بین معادن",
+                      "sql": sql_p.strip(), "result": str(result1)})
+        context_blocks.append(f"Production/Recovery/Downtime comparison across mines:\n{stats1}")
+        production_result_for_ratio = result1
+
+    if "equipment" in topics:
+        sql_e = _equipment_status_query(mine)
+        result2 = run_sql(sql_e)
+        stats2 = compute_equipment_status_breakdown(result2) or f"[Query failed: {result2}]"
+        steps.append({"label": "وضعیت تجهیزات بر اساس معدن",
+                      "sql": sql_e.strip(), "result": str(result2)})
+        context_blocks.append(f"Equipment status breakdown by mine:\n{stats2}")
+
+    if "workforce" in topics:
+        if role == "staff":
+            print(f"[SECURITY] Skipped FIXED_WORKFORCE_QUERY for role=staff (salary restricted)")
+            steps.append({"label": "نیروی انسانی بر اساس معدن (محدود شده بر اساس نقش)",
+                          "sql": "-- blocked: staff role cannot access salary data",
+                          "result": "ROLE_RESTRICTED_SALARY"})
+            context_blocks.append(
+                "Workforce/salary data: NOT retrieved for this user, because their "
+                "access role (staff) is restricted from all salary data, even in "
+                "aggregate/average form. Do not state or estimate any salary figures. "
+                "If the question asked about salary, explicitly say this data is "
+                "restricted for the current access level, in Persian."
+            )
+        else:
+            result3 = run_sql(FIXED_WORKFORCE_QUERY)
+            stats3 = compute_workforce_stats(result3) or f"[Query failed: {result3}]"
+            steps.append({"label": "نیروی انسانی بر اساس معدن",
+                          "sql": FIXED_WORKFORCE_QUERY.strip(), "result": str(result3)})
+            context_blocks.append(f"Workforce (employee count and average salary) by mine:\n{stats3}")
+            workforce_result_for_ratio = result3
+
+    if production_result_for_ratio is not None and workforce_result_for_ratio is not None:
+        ratio_block = compute_production_per_workforce_ratio(
+            production_result_for_ratio, workforce_result_for_ratio
+        )
+        if ratio_block:
+            context_blocks.append(ratio_block)
+
+    if "production" in topics and "equipment" in topics and is_production_per_equipment_question(question):
+        result_pe = run_sql(FIXED_PRODUCTION_PER_ACTIVE_EQUIPMENT_QUERY)
+        pe_block = compute_production_per_active_equipment_ratio(result_pe)
+        if pe_block:
+            steps.append({"label": "سنگ استخراج‌شده به‌ازای هر تجهیز فعال",
+                          "sql": FIXED_PRODUCTION_PER_ACTIVE_EQUIPMENT_QUERY.strip(),
+                          "result": str(result_pe)})
+            context_blocks.append(pe_block)
+
+    if "equipment" in topics and is_manufacturer_question(question):
+        result_mfr = run_sql(FIXED_EQUIPMENT_MANUFACTURER_QUERY)
+        mfr_block = compute_manufacturer_price_stats(result_mfr)
+        if mfr_block:
+            steps.append({"label": "قیمت تجهیزات بر اساس تولیدکننده",
+                          "sql": FIXED_EQUIPMENT_MANUFACTURER_QUERY.strip(),
+                          "result": str(result_mfr)})
+            context_blocks.append(mfr_block)
+
+    return context_blocks
+
 
 def ask_question(question: str, role: str = "staff", username: str = "unknown",
                   history: list | None = None, verbose: bool = False) -> dict:
@@ -1251,81 +1611,7 @@ def ask_question(question: str, role: str = "staff", username: str = "unknown",
                     "is_confidential": manager_individual_lookup}
 
         else:
-            topics = detect_question_topics(resolved_question)
-            production_result_for_ratio = None
-            workforce_result_for_ratio = None
-            context_blocks = []
-
-            if "production" in topics:
-                result1 = run_sql(FIXED_RECOVERY_DOWNTIME_QUERY)
-                stats1 = compute_comparison_stats(result1) or f"[Query failed: {result1}]"
-                steps.append({"label": "مقایسه نرخ بازیابی و توقف بین معادن",
-                              "sql": FIXED_RECOVERY_DOWNTIME_QUERY.strip(), "result": str(result1)})
-                context_blocks.append(f"Production/Recovery/Downtime comparison across mines:\n{stats1}")
-                production_result_for_ratio = result1
-
-            if "equipment" in topics:
-                result2 = run_sql(FIXED_EQUIPMENT_STATUS_QUERY)
-                stats2 = compute_equipment_status_breakdown(result2) or f"[Query failed: {result2}]"
-                steps.append({"label": "وضعیت تجهیزات بر اساس معدن",
-                              "sql": FIXED_EQUIPMENT_STATUS_QUERY.strip(), "result": str(result2)})
-                context_blocks.append(f"Equipment status breakdown by mine:\n{stats2}")
-
-            if "workforce" in topics:
-                if role == "staff":   
-                    print(f"[SECURITY] Skipped FIXED_WORKFORCE_QUERY for role=staff (salary restricted)")
-                    steps.append({"label": "نیروی انسانی بر اساس معدن (محدود شده بر اساس نقش)",
-                                  "sql": "-- blocked: staff role cannot access salary data",
-                                  "result": "ROLE_RESTRICTED_SALARY"})
-                    context_blocks.append(
-                        "Workforce/salary data: NOT retrieved for this user, because their "
-                        "access role (staff) is restricted from all salary data, even in "
-                        "aggregate/average form. Do not state or estimate any salary figures. "
-                        "If the question asked about salary, explicitly say this data is "
-                        "restricted for the current access level, in Persian."
-                    )
-                else:
-                    result3 = run_sql(FIXED_WORKFORCE_QUERY)
-                    stats3 = compute_workforce_stats(result3) or f"[Query failed: {result3}]"
-                    steps.append({"label": "نیروی انسانی بر اساس معدن",
-                                  "sql": FIXED_WORKFORCE_QUERY.strip(), "result": str(result3)})
-                    context_blocks.append(f"Workforce (employee count and average salary) by mine:\n{stats3}")
-                    workforce_result_for_ratio = result3
-
-            if production_result_for_ratio is not None and workforce_result_for_ratio is not None:
-                ratio_block = compute_production_per_workforce_ratio(
-                    production_result_for_ratio, workforce_result_for_ratio
-                )
-                if ratio_block:
-                    context_blocks.append(ratio_block)
-
-            if "production" in topics and "equipment" in topics and is_production_per_equipment_question(resolved_question):
-                result_pe = run_sql(FIXED_PRODUCTION_PER_ACTIVE_EQUIPMENT_QUERY)
-                pe_block = compute_production_per_active_equipment_ratio(result_pe)
-                if pe_block:
-                    steps.append({"label": "سنگ استخراج‌شده به‌ازای هر تجهیز فعال",
-                                  "sql": FIXED_PRODUCTION_PER_ACTIVE_EQUIPMENT_QUERY.strip(),
-                                  "result": str(result_pe)})
-                    context_blocks.append(pe_block)
-
-            if "production" in topics and is_total_production_question(resolved_question):
-                result_tot = run_sql(FIXED_PRODUCTION_TOTALS_QUERY)
-                totals_block = compute_production_totals(result_tot)
-                if totals_block:
-                    steps.append({"label": "جمع کل شاخص‌های تولید",
-                                  "sql": FIXED_PRODUCTION_TOTALS_QUERY.strip(),
-                                  "result": str(result_tot)})
-                    context_blocks.append(totals_block)
-
-            if "equipment" in topics and is_manufacturer_question(resolved_question):
-                result_mfr = run_sql(FIXED_EQUIPMENT_MANUFACTURER_QUERY)
-                mfr_block = compute_manufacturer_price_stats(result_mfr)
-                if mfr_block:
-                    steps.append({"label": "قیمت تجهیزات بر اساس تولیدکننده",
-                                  "sql": FIXED_EQUIPMENT_MANUFACTURER_QUERY.strip(),
-                                  "result": str(result_mfr)})
-                    context_blocks.append(mfr_block)
-
+            context_blocks = _collect_complex_context(resolved_question, role, steps)
             if not context_blocks:
                 context_blocks.append("No relevant data could be retrieved for this question.")
 
@@ -1433,80 +1719,7 @@ def ask_question_stream(question: str, role: str = "staff", username: str = "unk
             return
 
         else:
-            topics = detect_question_topics(resolved_question)
-            production_result_for_ratio = None
-            workforce_result_for_ratio = None
-            context_blocks = []
-
-            if "production" in topics:
-                result1 = run_sql(FIXED_RECOVERY_DOWNTIME_QUERY)
-                stats1 = compute_comparison_stats(result1) or f"[Query failed: {result1}]"
-                steps.append({"label": "مقایسه نرخ بازیابی و توقف بین معادن",
-                              "sql": FIXED_RECOVERY_DOWNTIME_QUERY.strip(), "result": str(result1)})
-                context_blocks.append(f"Production/Recovery/Downtime comparison across mines:\n{stats1}")
-                production_result_for_ratio = result1
-
-            if "equipment" in topics:
-                result2 = run_sql(FIXED_EQUIPMENT_STATUS_QUERY)
-                stats2 = compute_equipment_status_breakdown(result2) or f"[Query failed: {result2}]"
-                steps.append({"label": "وضعیت تجهیزات بر اساس معدن",
-                              "sql": FIXED_EQUIPMENT_STATUS_QUERY.strip(), "result": str(result2)})
-                context_blocks.append(f"Equipment status breakdown by mine:\n{stats2}")
-
-            if "workforce" in topics:
-                if role == "staff":
-                    steps.append({"label": "نیروی انسانی بر اساس معدن (محدود شده بر اساس نقش)",
-                                  "sql": "-- blocked: staff role cannot access salary data",
-                                  "result": "ROLE_RESTRICTED_SALARY"})
-                    context_blocks.append(
-                        "Workforce/salary data: NOT retrieved for this user, because their "
-                        "access role (staff) is restricted from all salary data, even in "
-                        "aggregate/average form. Do not state or estimate any salary figures. "
-                        "If the question asked about salary, explicitly say this data is "
-                        "restricted for the current access level, in Persian."
-                    )
-                else:
-                    result3 = run_sql(FIXED_WORKFORCE_QUERY)
-                    stats3 = compute_workforce_stats(result3) or f"[Query failed: {result3}]"
-                    steps.append({"label": "نیروی انسانی بر اساس معدن",
-                                  "sql": FIXED_WORKFORCE_QUERY.strip(), "result": str(result3)})
-                    context_blocks.append(f"Workforce (employee count and average salary) by mine:\n{stats3}")
-                    workforce_result_for_ratio = result3
-
-            if production_result_for_ratio is not None and workforce_result_for_ratio is not None:
-                ratio_block = compute_production_per_workforce_ratio(
-                    production_result_for_ratio, workforce_result_for_ratio
-                )
-                if ratio_block:
-                    context_blocks.append(ratio_block)
-
-            if "production" in topics and "equipment" in topics and is_production_per_equipment_question(resolved_question):
-                result_pe = run_sql(FIXED_PRODUCTION_PER_ACTIVE_EQUIPMENT_QUERY)
-                pe_block = compute_production_per_active_equipment_ratio(result_pe)
-                if pe_block:
-                    steps.append({"label": "سنگ استخراج‌شده به‌ازای هر تجهیز فعال",
-                                  "sql": FIXED_PRODUCTION_PER_ACTIVE_EQUIPMENT_QUERY.strip(),
-                                  "result": str(result_pe)})
-                    context_blocks.append(pe_block)
-
-            if "production" in topics and is_total_production_question(resolved_question):
-                result_tot = run_sql(FIXED_PRODUCTION_TOTALS_QUERY)
-                totals_block = compute_production_totals(result_tot)
-                if totals_block:
-                    steps.append({"label": "جمع کل شاخص‌های تولید",
-                                  "sql": FIXED_PRODUCTION_TOTALS_QUERY.strip(),
-                                  "result": str(result_tot)})
-                    context_blocks.append(totals_block)
-
-            if "equipment" in topics and is_manufacturer_question(resolved_question):
-                result_mfr = run_sql(FIXED_EQUIPMENT_MANUFACTURER_QUERY)
-                mfr_block = compute_manufacturer_price_stats(result_mfr)
-                if mfr_block:
-                    steps.append({"label": "قیمت تجهیزات بر اساس تولیدکننده",
-                                  "sql": FIXED_EQUIPMENT_MANUFACTURER_QUERY.strip(),
-                                  "result": str(result_mfr)})
-                    context_blocks.append(mfr_block)
-
+            context_blocks = _collect_complex_context(resolved_question, role, steps)
             if not context_blocks:
                 context_blocks.append("No relevant data could be retrieved for this question.")
 
