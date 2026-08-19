@@ -19,10 +19,19 @@ function handleUnauthorized(res: Response) {
   }
 }
 
-async function throwIfUnauthorized(res: Response, fallbackMessage: string) {
+async function handleApiError(res: Response, fallbackMessage: string): Promise<never> {
   if (res.status === 401) handleUnauthorized(res)
-  const err = await res.json().catch(() => ({ detail: fallbackMessage }))
-  throw new Error(err.detail || fallbackMessage)
+  const err = await res.json().catch(() => ({ detail: "" }))
+  const detail = typeof err.detail === "string" && err.detail.trim() ? err.detail : ""
+  const message =
+    STATUS_MESSAGES[res.status] || detail || fallbackMessage
+  throw new Error(message)
+}
+
+const STATUS_MESSAGES: Record<number, string> = {
+  401: "نشست شما منقضی شده است. لطفاً دوباره وارد شوید.",
+  403: "شما اجازه دسترسی به این گفتگو را ندارید.",
+  404: "گفتگو یافت نشد.",
 }
 
 export type LoginResult = {
@@ -62,7 +71,7 @@ export async function askQuestion(
     body: JSON.stringify({ question, history: history || [] }),
   })
   if (!res.ok) {
-    await throwIfUnauthorized(res, "خطای غیرمنتظره رخ داد.")
+    await handleApiError(res, "خطای غیرمنتظره رخ داد.")
   }
   return res.json()
 }
@@ -121,17 +130,17 @@ export async function askQuestionStream(
   }
 }
 
-export async function listSessions(userId: number) {
-  const res = await fetch(`${API_BASE}/api/sessions/${userId}`, { headers: authHeaders() })
-  if (!res.ok) await throwIfUnauthorized(res, "خطا در دریافت گفتگوها")
+export async function listSessions() {
+  const res = await fetch(`${API_BASE}/api/sessions`, { headers: authHeaders() })
+  if (!res.ok) await handleApiError(res, "خطا در دریافت گفتگوها")
   return res.json()
 }
 
-export async function loadMessages(userId: number, sessionId: string) {
-  const res = await fetch(`${API_BASE}/api/sessions/${userId}/${sessionId}/messages`, {
+export async function loadMessages(sessionId: string) {
+  const res = await fetch(`${API_BASE}/api/sessions/${sessionId}/messages`, {
     headers: authHeaders(),
   })
-  if (!res.ok) await throwIfUnauthorized(res, "خطا در دریافت پیام‌ها")
+  if (!res.ok) await handleApiError(res, "خطا در دریافت پیام‌ها")
   return res.json()
 }
 
@@ -141,7 +150,7 @@ export async function createSession(title: string): Promise<{ session_id: string
     headers: { "Content-Type": "application/json", ...authHeaders() },
     body: JSON.stringify({ title }),
   })
-  if (!res.ok) await throwIfUnauthorized(res, "خطا در ایجاد گفتگو")
+  if (!res.ok) await handleApiError(res, "خطا در ایجاد گفتگو")
   return res.json()
 }
 
@@ -156,16 +165,16 @@ export async function saveMessage(
     headers: { "Content-Type": "application/json", ...authHeaders() },
     body: JSON.stringify({ session_id: sessionId, role, content, steps }),
   })
-  if (!res.ok) await throwIfUnauthorized(res, "خطا در ذخیره پیام")
+  if (!res.ok) await handleApiError(res, "خطا در ذخیره پیام")
   return res.json()
 }
 
-export async function deleteSession(userId: number, sessionId: string) {
-  const res = await fetch(`${API_BASE}/api/sessions/${userId}/${sessionId}`, {
+export async function deleteSession(sessionId: string) {
+  const res = await fetch(`${API_BASE}/api/sessions/${sessionId}`, {
     method: "DELETE",
     headers: authHeaders(),
   })
-  if (!res.ok) await throwIfUnauthorized(res, "خطا در حذف گفتگو")
+  if (!res.ok) await handleApiError(res, "خطا در حذف گفتگو")
   return res.json()
 }
 
@@ -178,6 +187,6 @@ export type Stats = {
 
 export async function getStats(): Promise<Stats> {
   const res = await fetch(`${API_BASE}/api/stats`, { headers: authHeaders() })
-  if (!res.ok) await throwIfUnauthorized(res, "خطا در دریافت آمار")
+  if (!res.ok) await handleApiError(res, "خطا در دریافت آمار")
   return res.json()
 }

@@ -27,7 +27,7 @@ from schema_constants import STATUS_RUNNING
 from chat_storage import (
     init_chat_tables, create_session, save_message,
     list_sessions, load_messages, delete_session, is_session_owner,
-    init_user_table, authenticate_user, list_audit_log
+    get_session_owner, init_user_table, authenticate_user, list_audit_log
 )
 
 load_dotenv()
@@ -76,7 +76,7 @@ app.add_middleware(
 init_chat_tables()
 init_user_table()
 
-security_scheme = HTTPBearer()
+security_scheme = HTTPBearer(auto_error=False)
 
 
 def create_access_token(user_id: int, username: str, role: str) -> str:
@@ -89,12 +89,14 @@ def create_access_token(user_id: int, username: str, role: str) -> str:
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
 
-def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security_scheme)) -> dict:
+def get_current_user(credentials: Optional[HTTPAuthorizationCredentials] = Depends(security_scheme)) -> dict:
     """
     Verifies the JWT and returns its payload. This is the ONLY source of
     truth for who the caller is — every protected endpoint below uses
     this instead of trusting anything the client sent in the body/URL.
     """
+    if credentials is None:
+        raise HTTPException(status_code=401, detail="توکن ارائه نشده است. لطفاً دوباره وارد شوید.")
     token = credentials.credentials
     try:
         payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
@@ -103,19 +105,6 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
         raise HTTPException(status_code=401, detail="نشست شما منقضی شده است. دوباره وارد شوید.")
     except jwt.InvalidTokenError:
         raise HTTPException(status_code=401, detail="توکن نامعتبر است.")
-
-
-def require_matching_user(user_id: int, current_user: dict = Depends(get_current_user)) -> dict:
-    """
-    Extra IDOR guard for the session endpoints below, which still take
-    user_id as a URL path parameter (kept for minimal disruption to the
-    existing route shapes) — this verifies the path's user_id actually
-    matches the authenticated token's user_id, so no user can read/
-    delete another user's sessions by guessing/editing the URL.
-    """
-    if current_user["user_id"] != user_id:
-        raise HTTPException(status_code=403, detail="دسترسی غیرمجاز.")
-    return current_user
 
 
 # ---------- Request/response models ----------
@@ -184,13 +173,18 @@ def ask_stream(payload: AskRequest, current_user: dict = Depends(get_current_use
 
 
 # ---------- Sessions ----------
-@app.get("/api/sessions/{user_id}")
-def get_sessions(user_id: int, current_user: dict = Depends(require_matching_user)):
-    return list_sessions(user_id=user_id)
+@app.get("/api/sessions")
+def get_sessions(current_user: dict = Depends(get_current_user)):
+    return list_sessions(user_id=current_user["user_id"])
 
-@app.get("/api/sessions/{user_id}/{session_id}/messages")
-def get_messages(user_id: int, session_id: str, current_user: dict = Depends(require_matching_user)):
-    return load_messages(session_id, user_id=user_id)
+@app.get("/api/sessions/{session_id}/messages")
+def get_messages(session_id: str, current_user: dict = Depends(get_current_user)):
+    owner = get_session_owner(session_id)
+    if owner is None:
+        raise HTTPException(status_code=404, detail="گفتگو یافت نشد.")
+    if owner != current_user["user_id"]:
+        raise HTTPException(status_code=403, detail="دسترسی غیرمجاز.")
+    return load_messages(session_id, user_id=current_user["user_id"])
 
 @app.post("/api/sessions")
 def new_session(payload: CreateSessionRequest, current_user: dict = Depends(get_current_user)):
@@ -204,9 +198,14 @@ def add_message(payload: SaveMessageRequest, current_user: dict = Depends(get_cu
     save_message(payload.session_id, payload.role, payload.content, payload.steps)
     return {"status": "ok"}
 
-@app.delete("/api/sessions/{user_id}/{session_id}")
-def remove_session(user_id: int, session_id: str, current_user: dict = Depends(require_matching_user)):
-    delete_session(session_id, user_id=user_id)
+@app.delete("/api/sessions/{session_id}")
+def remove_session(session_id: str, current_user: dict = Depends(get_current_user)):
+    owner = get_session_owner(session_id)
+    if owner is None:
+        raise HTTPException(status_code=404, detail="گفتگو یافت نشد.")
+    if owner != current_user["user_id"]:
+        raise HTTPException(status_code=403, detail="دسترسی غیرمجاز.")
+    delete_session(session_id, user_id=current_user["user_id"])
     return {"status": "ok"}
 
 

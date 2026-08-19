@@ -5,7 +5,7 @@ Persian-language copper-mining data Q&A assistant ("دستیار هوشمند م
 ## Architecture
 
 - `agent.py` — core pipeline: security checks → SQL generation → run → final answer, all via a local Ollama LLM (`http://127.0.0.1:11434`, default model `qwen3:4b-instruct-2507-q4_K_M`, override with `MODEL_NAME` env var). Deliberately strips `HTTP_PROXY`/`HTTPS_PROXY` and sets `NO_PROXY=localhost,127.0.0.1` so Ollama calls never route through a proxy — don't remove.
-- `api_server.py` — FastAPI wrapper on port **8000** exposing the agent to the Next.js frontend. Requires a valid JWT; role/user never trusted from request body/URL (see `require_matching_user`). `/api/ask/stream` yields SSE events `meta` → `token`* → `done` (`frontend/lib/api.ts` parses this contract).
+- `api_server.py` — FastAPI wrapper on port **8000** exposing the agent to the Next.js frontend. Requires a valid JWT; role/user never trusted from request body/URL — session endpoints derive `user_id` from the JWT only (no `user_id` in the URL). `/api/ask/stream` yields SSE events `meta` → `token`* → `done` (`frontend/lib/api.ts` parses this contract).
 - `app.py` — legacy Streamlit UI (same backend, session-based login). `frontend/` — Next.js 16 App Router UI (current).
 - `chat_storage.py` — chat history, `AppUsers` (login/RBAC), and `AuditLog` tables, written with hardcoded SQL (never LLM-generated). Uses its own engine + pooled connection. Also defines `is_session_owner()` (IDOR guard), `list_audit_log()` (manager review), and `CONFIDENTIAL_CATEGORIES` (redacts stored question text).
 - `auth.py` — PBKDF2-SHA256 hashing (`<iterations>$<salt_hex>$<hash_hex>`).

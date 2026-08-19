@@ -38,16 +38,29 @@ export function Sidebar({
   onToggleSidebar,
 }: SidebarProps) {
   const [sessions, setSessions] = useState<SessionSummary[]>([])
+  const [loadError, setLoadError] = useState<string | null>(null)
 
   useEffect(() => {
-    listSessions(user.user_id).then(setSessions).catch(() => setSessions([]))
-  }, [user.user_id, refreshKey])
+    listSessions()
+      .then((data) => {
+        setSessions(data)
+        setLoadError(null)
+      })
+      .catch((err) => {
+        setSessions([])
+        setLoadError(err instanceof Error ? err.message : "خطا در دریافت گفتگوها")
+      })
+  }, [refreshKey])
 
   const handleDelete = async (e: React.MouseEvent, sessionId: string) => {
     e.stopPropagation()
-    await deleteSession(user.user_id, sessionId)
-    setSessions((prev) => prev.filter((s) => s.session_id !== sessionId))
-    if (activeSessionId === sessionId) onNewConversation()
+    try {
+      await deleteSession(sessionId)
+      setSessions((prev) => prev.filter((s) => s.session_id !== sessionId))
+      if (activeSessionId === sessionId) onNewConversation()
+    } catch {
+      // 401/403/404 already surfaced through the shared api error handler.
+    }
   }
 
   const handleSelectMobile = (id: string) => {
@@ -109,7 +122,8 @@ export function Sidebar({
 
       <div className="flex-1 min-h-0 overflow-y-auto px-3 space-y-1">
         <p className="text-[11px] text-neutral-500 px-2 mb-2 font-medium">گفتگوها</p>
-        {sessions.length === 0 && <p className="text-xs text-neutral-600 px-2">هنوز گفتگویی ثبت نشده</p>}
+        {loadError && <p className="text-xs text-red-400 px-2 mb-2">{loadError}</p>}
+        {sessions.length === 0 && !loadError && <p className="text-xs text-neutral-600 px-2">هنوز گفتگویی ثبت نشده</p>}
         {sessions.map((s) => (
           <div
             key={s.session_id}

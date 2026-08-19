@@ -111,14 +111,11 @@ def load_messages(session_id: str, user_id: int):
     a user must not be able to read another user's messages even by
     guessing/supplying another session's SessionID.
     """
-    with storage_engine.connect() as conn:
-        owner_check = conn.execute(
-            text("SELECT UserID FROM ChatSessions WHERE SessionID = :sid"),
-            {"sid": session_id}
-        ).fetchone()
-        if owner_check is None or owner_check[0] != user_id:
-            return []
+    owner_id = get_session_owner(session_id)
+    if owner_id is None or owner_id != user_id:
+        return []
 
+    with storage_engine.connect() as conn:
         rows = conn.execute(
             text("SELECT Role, Content, StepsJSON FROM ChatMessages WHERE SessionID=:sid ORDER BY MessageID ASC"),
             {"sid": session_id}
@@ -139,15 +136,26 @@ def delete_session(session_id: str, user_id: int):
     Deletes a session and all of its messages.
     IDOR guard: only deletes if the session actually belongs to user_id.
     """
+    owner_id = get_session_owner(session_id)
+    if owner_id is None or owner_id != user_id:
+        return
     with storage_engine.begin() as conn:
-        owner_check = conn.execute(
+        conn.execute(text("DELETE FROM ChatMessages WHERE SessionID=:sid"), {"sid": session_id})
+        conn.execute(text("DELETE FROM ChatSessions WHERE SessionID=:sid"), {"sid": session_id})
+
+
+def get_session_owner(session_id: str):
+    """
+    Returns the UserID that owns the given session, or None if no such
+    session exists. Single source of truth for the ownership lookup used
+    by is_session_owner / load_messages / delete_session.
+    """
+    with storage_engine.connect() as conn:
+        row = conn.execute(
             text("SELECT UserID FROM ChatSessions WHERE SessionID = :sid"),
             {"sid": session_id}
         ).fetchone()
-        if owner_check is None or owner_check[0] != user_id:
-            return
-        conn.execute(text("DELETE FROM ChatMessages WHERE SessionID=:sid"), {"sid": session_id})
-        conn.execute(text("DELETE FROM ChatSessions WHERE SessionID=:sid"), {"sid": session_id})
+    return row[0] if row is not None else None
 
 
 def is_session_owner(session_id: str, user_id: int) -> bool:
@@ -156,12 +164,8 @@ def is_session_owner(session_id: str, user_id: int) -> bool:
     Used to authorize message writes to a session (IDOR guard, matching the
     checks already done in load_messages/delete_session).
     """
-    with storage_engine.connect() as conn:
-        row = conn.execute(
-            text("SELECT UserID FROM ChatSessions WHERE SessionID = :sid"),
-            {"sid": session_id}
-        ).fetchone()
-    return row is not None and row[0] == user_id
+    owner_id = get_session_owner(session_id)
+    return owner_id is not None and owner_id == user_id
 
 
 # ============================================================

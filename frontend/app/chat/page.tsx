@@ -51,6 +51,7 @@ export default function ChatPage() {
   const [showTechnical, setShowTechnical] = useState(false)
   const [sidebarRefreshKey, setSidebarRefreshKey] = useState(0)
   const [confidentialNotice, setConfidentialNotice] = useState(false)
+  const [sessionError, setSessionError] = useState<string | null>(null)
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false)
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState<boolean>(() => {
     if (typeof window === 'undefined') return false
@@ -123,17 +124,23 @@ export default function ChatPage() {
     setSessionId(null)
     setMessages([])
     setConfidentialNotice(false)
+    setSessionError(null)
   }, [])
 
   const handleSelectSession = useCallback(
     async (id: string) => {
       if (!user) return
-      const msgs = await loadMessages(user.user_id, id)
-      followRef.current = true
-      setIsNearBottom(true)
-      setSessionId(id)
-      setMessages(msgs)
-      setConfidentialNotice(false)
+      setSessionError(null)
+      try {
+        const msgs = await loadMessages(id)
+        followRef.current = true
+        setIsNearBottom(true)
+        setSessionId(id)
+        setMessages(msgs)
+        setConfidentialNotice(false)
+      } catch (err) {
+        setSessionError(err instanceof Error ? err.message : "خطا در دریافت گفتگو.")
+      }
     },
     [user]
   )
@@ -154,6 +161,7 @@ export default function ChatPage() {
     setMessages((prev) => [...prev, { role: 'user', content: question }])
     setIsLoading(true)
     setConfidentialNotice(false)
+    setSessionError(null)
 
     let assistantIndex = -1
     let fullAnswer = ''
@@ -246,6 +254,15 @@ export default function ChatPage() {
                   <KpiCards />
                   <EmptyState onPick={handleSend} />
                 </>
+              )}
+
+              {sessionError && (
+                <div
+                  className="mb-4 flex items-start gap-2 text-sm text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2.5"
+                  role="alert"
+                >
+                  <span>{sessionError}</span>
+                </div>
               )}
 
               <div className="space-y-4">
